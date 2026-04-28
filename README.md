@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/jeswin-mcpfs-badge.png)](https://mseep.ai/app/jeswin-mcpfs)
+
 # Filesystem MCP Server (HTTP Streaming)
 
 An HTTP streaming port of the official [MCP Filesystem Server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) by Anthropic.
