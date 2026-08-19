@@ -1179,7 +1179,6 @@ app.get("/.well-known/oauth-authorization-server", (req: Request, res: Response)
 // Dynamic Client Registration (RFC 7591)
 app.post("/register", express.json(), async (req: Request, res: Response) => {
   const { redirect_uris, client_name } = req.body;
-  logger.info(`register log: ${client_name}`);
 
   if (!redirect_uris || !Array.isArray(redirect_uris) || redirect_uris.length === 0) {
     res.status(400).json({
@@ -1217,9 +1216,6 @@ app.post("/register", express.json(), async (req: Request, res: Response) => {
 app.get("/authorize", (req: Request, res: Response) => {
   const { response_type, client_id, redirect_uri, state, code_challenge, code_challenge_method } =
     req.query as Record<string, string>;
-
-  logger.info(`authorize log: ${client_id}`);
-  logger.info(`reg clients - ${JSON.stringify(registeredClients)}`);
 
   // Validate required parameters
   if (response_type !== "code") {
@@ -1693,10 +1689,6 @@ app.post(
   }
 );
 
-app.use((req, res, next) => {
-  logger.info(`HTTP ${req.method} ${req.originalUrl} ${res}`);
-  next();
-});
 
 // Map sessionId to server transport for each client
 const transports: Map<string, StreamableHTTPServerTransport> = new Map();
