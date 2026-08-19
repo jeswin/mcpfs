@@ -203,6 +203,51 @@ type RegisteredClient = {
 };
 const registeredClients: Map<string, RegisteredClient> = new Map();
 
+const oauthClientsPath =
+  process.env.OAUTH_CLIENTS_FILE ||
+  path.join(projectRoot, "data", "oauth-clients.json");
+
+async function loadRegisteredClients(): Promise<void> {
+  try {
+    const content = await fs.readFile(oauthClientsPath, "utf-8");
+    const clients = JSON.parse(content) as Record<string, RegisteredClient>;
+
+    for (const [clientId, client] of Object.entries(clients)) {
+      registeredClients.set(clientId, client);
+    }
+
+    logger.info(`Loaded ${registeredClients.size} registered OAuth client(s)`);
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+
+    if (err.code === "ENOENT") {
+      logger.info("No persisted OAuth clients found");
+      return;
+    }
+
+    throw error;
+  }
+}
+
+async function saveRegisteredClients(): Promise<void> {
+  const directory = path.dirname(oauthClientsPath);
+  await fs.mkdir(directory, { recursive: true });
+
+  const clients = Object.fromEntries(registeredClients);
+
+  const tempPath = `${oauthClientsPath}.tmp`;
+
+  await fs.writeFile(
+    tempPath,
+    JSON.stringify(clients, null, 2) + "\n",
+    "utf-8"
+  );
+
+  await fs.rename(tempPath, oauthClientsPath);
+}
+
+await loadRegisteredClients();
+
 // Pre-register the static client from environment variables
 // This is for machine-to-machine access (client_credentials flow) and local testing
 // ChatGPT and other MCP clients use dynamic registration and provide their own redirect URIs
@@ -1132,8 +1177,9 @@ app.get("/.well-known/oauth-authorization-server", (req: Request, res: Response)
 });
 
 // Dynamic Client Registration (RFC 7591)
-app.post("/register", express.json(), (req: Request, res: Response) => {
+app.post("/register", express.json(), async (req: Request, res: Response) => {
   const { redirect_uris, client_name } = req.body;
+  logger.info(`register log: ${client_name}`);
 
   if (!redirect_uris || !Array.isArray(redirect_uris) || redirect_uris.length === 0) {
     res.status(400).json({
@@ -1154,6 +1200,8 @@ app.post("/register", express.json(), (req: Request, res: Response) => {
     createdAt: Date.now(),
   });
 
+  await saveRegisteredClients();
+
   logger.info(`Registered new client: ${clientId} (${client_name || "unnamed"})`);
 
   res.status(201).json({
@@ -1170,6 +1218,9 @@ app.get("/authorize", (req: Request, res: Response) => {
   const { response_type, client_id, redirect_uri, state, code_challenge, code_challenge_method } =
     req.query as Record<string, string>;
 
+  logger.info(`authorize log: ${client_id}`);
+  logger.info(`reg clients - ${JSON.stringify(registeredClients)}`);
+
   // Validate required parameters
   if (response_type !== "code") {
     res.status(400).send("Invalid response_type. Only 'code' is supported.");
@@ -1183,6 +1234,8 @@ app.get("/authorize", (req: Request, res: Response) => {
 
   // Check if client is registered
   const client = registeredClients.get(client_id);
+  
+
   if (!client) {
     res.status(400).send(`Unknown client_id: ${client_id}`);
     return;
@@ -1639,6 +1692,11 @@ app.post(
     });
   }
 );
+
+app.use((req, res, next) => {
+  logger.info(`HTTP ${req.method} ${req.originalUrl} ${res}`);
+  next();
+});
 
 // Map sessionId to server transport for each client
 const transports: Map<string, StreamableHTTPServerTransport> = new Map();
