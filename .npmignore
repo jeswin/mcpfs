@@ -6,6 +6,7 @@ tsconfig.json
 .env
 .env.*
 !.env.example
+.mcpfs/
 *.tsbuildinfo
 
 # Git

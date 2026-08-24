@@ -144,11 +144,14 @@ CLIENT_ID=myid CLIENT_SECRET=mysecret mcpfs /path/to/dir
 PORT=8080 CLIENT_ID=myid CLIENT_SECRET=mysecret mcpfs /path/to/dir
 ```
 
-| Variable        | Required | Default | Description         |
-| --------------- | -------- | ------- | ------------------- |
-| `CLIENT_ID`     | Yes      | -       | OAuth client ID     |
-| `CLIENT_SECRET` | Yes      | -       | OAuth client secret |
-| `PORT`          | No       | 24024   | Server port         |
+| Variable           | Required | Default                   | Description                             |
+| ------------------ | -------- | ------------------------- | --------------------------------------- |
+| `CLIENT_ID`        | Yes      | -                         | OAuth client ID                         |
+| `CLIENT_SECRET`    | Yes      | -                         | OAuth client secret                     |
+| `PORT`             | No       | 24024                     | Server port                             |
+| `OAUTH_STATE_PATH` | No       | `.mcpfs/oauth-state.json` | Persistent OAuth state file             |
+| `PUBLIC_URL`       | No       | Derived from request      | Public HTTPS URL used in OAuth metadata |
+| `TRUST_PROXY`      | No       | `false`                   | Trust reverse-proxy forwarded headers   |
 
 ---
 
@@ -182,6 +185,20 @@ PORT=8080 CLIENT_ID=myid CLIENT_SECRET=mysecret mcpfs /path/to/dir
 ## Authentication
 
 This server supports OAuth 2.1 with multiple authentication flows:
+
+### Token persistence
+
+Access and refresh tokens survive a normal process restart. OAuth state is stored in
+`.mcpfs/oauth-state.json` by default, or at the path specified by `OAUTH_STATE_PATH`.
+The file is created with owner-only permissions where supported, written atomically,
+and contains SHA-256 hashes of tokens and client secrets rather than their plaintext
+values. Keep the state directory private and back it up only as securely as your
+`.env` file. Pending authorization codes remain intentionally short-lived and are
+discarded on restart.
+
+For a multi-process or multi-host deployment, use a shared transactional store and
+an external key-management policy; this built-in file store is for a single server
+process.
 
 ### Authorization Code Flow with PKCE (Recommended)
 
@@ -341,7 +358,7 @@ MCP clients that support [Roots](https://modelcontextprotocol.io/docs/learn/clie
 ## Security
 
 - **OAuth 2.1 authentication** with PKCE for authorization code flow
-- **Token audience validation** - tokens are bound to the resource server
+- Access and refresh tokens are persisted as one-way hashes with owner-only file permissions
 - **Refresh token rotation** - tokens are rotated on each refresh (OAuth 2.1 requirement)
 - Only directories specified at startup (or via MCP Roots) are accessible
 - Symlinks are resolved to prevent directory escape attacks

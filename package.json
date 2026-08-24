@@ -6,7 +6,7 @@
   "author": "jeswin",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jeswin/server-filesystem-http.git"
+    "url": "https://github.com/jeswin/mcpfs.git"
   },
   "type": "module",
   "bin": {

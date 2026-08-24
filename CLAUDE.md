@@ -38,6 +38,7 @@ mcpfs is an HTTP streaming port of the official MCP Filesystem Server. It replac
 - Get file metadata
 - Dynamic directory access control via MCP Roots
 - OAuth 2.1 authentication with PKCE support
+- Persistent, hashed OAuth token state with atomic file writes
 - ChatGPT integration via MCP connectors
 
 ## Code Principles
@@ -90,6 +91,7 @@ npm run lint:fix
 mcpfs/
 ├── src/
 │   ├── index.ts          # Main entry point, Express server, OAuth endpoints
+│   ├── oauth-store.ts    # Persistent hashed OAuth state store
 │   ├── lib.ts            # Filesystem operations
 │   ├── path-utils.ts     # Path normalization utilities
 │   ├── roots-utils.ts    # MCP roots handling
@@ -102,12 +104,15 @@ mcpfs/
 
 ## Environment Variables
 
-| Variable        | Required | Default | Description                              |
-| --------------- | -------- | ------- | ---------------------------------------- |
-| `CLIENT_ID`     | Yes      | -       | OAuth client ID                          |
-| `CLIENT_SECRET` | Yes      | -       | OAuth client secret                      |
-| `PORT`          | No       | 24024   | Server port                              |
-| `LOG_LEVEL`     | No       | info    | Logging level (debug, info, warn, error) |
+| Variable           | Required | Default                   | Description                              |
+| ------------------ | -------- | ------------------------- | ---------------------------------------- |
+| `CLIENT_ID`        | Yes      | -                         | OAuth client ID                          |
+| `CLIENT_SECRET`    | Yes      | -                         | OAuth client secret                      |
+| `PORT`             | No       | 24024                     | Server port                              |
+| `LOG_LEVEL`        | No       | info                      | Logging level (debug, info, warn, error) |
+| `OAUTH_STATE_PATH` | No       | `.mcpfs/oauth-state.json` | Persistent OAuth state file              |
+| `PUBLIC_URL`       | No       | Derived from request      | Public URL used in OAuth metadata        |
+| `TRUST_PROXY`      | No       | false                     | Trust reverse-proxy forwarded headers    |
 
 ## Git Workflow
 
