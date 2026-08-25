@@ -48,17 +48,21 @@ function generateRandomCredentials(): { clientId: string; clientSecret: string }
 }
 
 // Create .env file with random credentials
-async function createEnvFile(): Promise<{ clientId: string; clientSecret: string }> {
+async function createEnvFile(): Promise<{ clientId: string; clientSecret: string, redirectUris: string[] }> {
   const credentials = generateRandomCredentials();
   const envContent = `# OAuth Client Credentials (required)
 CLIENT_ID=${credentials.clientId}
 CLIENT_SECRET=${credentials.clientSecret}
+CLIENT_REDIRECT_URIS=http://localhost:3000/callback,http://127.0.0.1:3000/callback
 
 # Server configuration (optional)
 PORT=24024
 `;
   await fs.writeFile(envPath, envContent);
-  return credentials;
+  return {
+    ...credentials,
+    redirectUris: ["http://localhost:3000/callback", "http://127.0.0.1:3000/callback"],
+  };
 }
 
 // Load .env file manually
@@ -114,6 +118,7 @@ if (hasInit) {
   logger.info("Created .env file with random credentials:");
   logger.info(`  CLIENT_ID=${credentials.clientId}`);
   logger.info(`  CLIENT_SECRET=${credentials.clientSecret}`);
+  logger.info(`  REDIRECT_URIS=${credentials.redirectUris}`);
   logger.info(`File location: ${envPath}`);
   logger.info("You can now start the server with:");
   logger.info("  node dist/index.js /path/to/allowed/directory");
@@ -126,6 +131,10 @@ await loadEnvFile();
 // Check for credentials, prompt to create if missing
 let CLIENT_ID = process.env.CLIENT_ID;
 let CLIENT_SECRET = process.env.CLIENT_SECRET;
+let CLIENT_REDIRECT_URIS = process.env.CLIENT_REDIRECT_URIS
+  ?.split(",")
+  .map((uri) => uri.trim())
+  .filter(Boolean);
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
   logger.warn("Missing required environment variables: CLIENT_ID and CLIENT_SECRET");
@@ -200,21 +209,24 @@ type RegisteredClient = {
   redirectUris: string[];
   clientName?: string | undefined;
   createdAt: number;
+  preRegistered?: boolean | undefined; // Flag to indicate if the client was pre-registered from .env
 };
 const registeredClients: Map<string, RegisteredClient> = new Map();
 
 // Pre-register the static client from environment variables
-// This is for machine-to-machine access (client_credentials flow) and local testing
-// ChatGPT and other MCP clients use dynamic registration and provide their own redirect URIs
+const redirectUris = CLIENT_REDIRECT_URIS && CLIENT_REDIRECT_URIS.length > 0
+  ? CLIENT_REDIRECT_URIS
+  : ["http://localhost:3000/callback", "http://127.0.0.1:3000/callback"];
 if (CLIENT_ID) {
   registeredClients.set(CLIENT_ID, {
     clientId: CLIENT_ID,
     clientSecret: CLIENT_SECRET,
-    redirectUris: ["http://localhost:3000/callback", "http://127.0.0.1:3000/callback"],
+    redirectUris: redirectUris,
     clientName: "Static Admin Client",
     createdAt: Date.now(),
+    preRegistered: true,
   });
-  logger.info(`Pre-registered static client: ${CLIENT_ID}`);
+  logger.info(`Pre-registered static client: ${CLIENT_ID} with redirect URIs: ${redirectUris.join(", ")}`);
 }
 
 // Token expiration times
@@ -1152,6 +1164,7 @@ app.post("/register", express.json(), (req: Request, res: Response) => {
     redirectUris: redirect_uris,
     clientName: client_name,
     createdAt: Date.now(),
+    preRegistered: false,
   });
 
   logger.info(`Registered new client: ${clientId} (${client_name || "unnamed"})`);
@@ -1193,14 +1206,17 @@ app.get("/authorize", (req: Request, res: Response) => {
     return;
   }
 
-  // Validate redirect_uri against registered URIs (with wildcard support)
-  const isValidRedirect = client.redirectUris.some((uri) => {
-    if (uri.includes("*")) {
-      const pattern = uri.replace(/\*/g, ".*");
-      return new RegExp(`^${pattern}$`).test(redirect_uri);
-    }
-    return uri === redirect_uri;
-  });
+  // Validate redirect_uri against registered URIs
+  // pre-registered clients must have exact match, but dynamically registered clients can use wildcard patterns
+  const isValidRedirect = client.preRegistered
+    ? client.redirectUris.includes(redirect_uri)
+    : client.redirectUris.some((uri) => {
+      if (uri.includes("*")) {
+        const pattern = uri.replace(/\*/g, ".*");
+        return new RegExp(`^${pattern}$`).test(redirect_uri);
+      }
+      return uri === redirect_uri;
+    });
 
   if (!isValidRedirect) {
     res.status(400).send(`Invalid redirect_uri: ${redirect_uri}`);
