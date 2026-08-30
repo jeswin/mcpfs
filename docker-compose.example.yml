@@ -1,0 +1,21 @@
+services:
+  mcpfs:
+    build: .
+    container_name: obsidian-mcpfs
+    restart: unless-stopped
+    init: true
+    environment:
+      MCP_AUTH_SECRET: ${MCPFS_AUTH_SECRET:?Set MCPFS_AUTH_SECRET externally}
+      MCP_PUBLIC_URL: ${MCPFS_PUBLIC_URL:?Set MCPFS_PUBLIC_URL externally}
+      OAUTH_STATE_PATH: /var/lib/mcpfs/oauth-state.json
+      PORT: "24024"
+    volumes:
+      - ./mcpfs/oauth:/var/lib/mcpfs:rw
+      - ${OBSIDIAN_VAULT_PATH:?Set OBSIDIAN_VAULT_PATH}:/srv/obsidian/vault:rw
+    command: ["/srv/obsidian/vault"]
+    networks:
+      - risu_net
+
+networks:
+  risu_net:
+    external: true

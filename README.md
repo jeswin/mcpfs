@@ -21,20 +21,23 @@ This port uses HTTP Streaming, enabling:
 - **Web client compatibility** - Works with browser-based MCP clients
 - **Standalone deployment** - Run as a service without subprocess management
 
-All filesystem functionality from the original is preserved.
+This fork keeps the file-based interface and OAuth transport, and is designed
+to expose a directory that is synchronized by an external filesystem tool
+such as Syncthing. mcpfs reads and writes that directory directly; it does not
+call a synchronization API or require a particular synchronization backend.
 
 ---
 
 ## Features
 
 - Read/write files
-- Create/list/delete directories
-- Move files/directories
+- Create/list directories
 - Search files
 - Get file metadata
-- Dynamic directory access control via [Roots](https://modelcontextprotocol.io/docs/learn/client-concepts#roots)
+- Fixed directory access: only the configured synchronized vault is exposed
 - **OAuth 2.1 authentication** with PKCE support
 - **ChatGPT integration** via MCP connectors
+- Works with native Syncthing services and other filesystem synchronizers
 
 ## Installation
 
@@ -52,11 +55,11 @@ npm run build
 ## Quick Start
 
 ```bash
-# Initialize credentials (creates .env with random values)
+# Initialize credentials (creates .env with a random owner secret)
 mcpfs --init
 
-# Start the server
-mcpfs /path/to/your/project
+# Start the server against the locally synchronized vault
+mcpfs /srv/obsidian/mcp-vault
 ```
 
 ## Using with ChatGPT
@@ -97,13 +100,16 @@ You'll get a URL like `https://random-words.trycloudflare.com`
 
 ### Step 4: Connect in ChatGPT
 
-1. Go to **ChatGPT → Settings → Connectors → Create**
+1. Go to **ChatGPT → Settings → Apps → Create** (developer mode/custom MCP app)
 2. **Name**: `mcpfs` (or any name you prefer)
 3. **URL**: `https://random-words.trycloudflare.com/mcp` (use your tunnel URL + `/mcp`)
 4. **Authentication**: OAuth
-5. **Client ID**: Copy from your `.env` file
-6. **Client Secret**: Copy from your `.env` file
-7. Click **Create**
+5. Click **Create**
+
+ChatGPT dynamically registers its OAuth client and starts the authorization
+flow. On the mcpfs consent page, enter `MCP_AUTH_SECRET`; this is the only
+owner-controlled secret required to approve access. The server then redirects
+back to ChatGPT and completes the code/token exchange automatically.
 
 ChatGPT will redirect you to authorize. Once complete, you can use filesystem tools in ChatGPT!
 
@@ -118,9 +124,18 @@ Quick tunnels generate a new URL each time. For a permanent URL:
 
 ## Usage
 
-### Default Directory Behavior
+### Synchronized vault mode
 
-When no directories are specified, the server will serve the **current working directory** if it's considered safe. The server will refuse to auto-serve:
+The server serves the directory passed on the command line. When using
+Syncthing, this should be the same local directory configured as the
+Syncthing folder on the Linux host. mcpfs treats it as a normal local
+filesystem: Syncthing runs independently and no Syncthing credentials or REST
+endpoint are needed by mcpfs.
+
+Client-provided MCP Roots are ignored so the exposed directory cannot be
+expanded by the MCP client. When no directories are specified, the server
+will serve the **current working directory** if it's considered safe. The
+server will refuse to auto-serve:
 
 - Root directory (`/`)
 - Home directory (`~`)
@@ -130,28 +145,102 @@ To serve these directories, you must specify them explicitly as command-line arg
 
 ### Command Line Options
 
-| Option    | Description                                     |
-| --------- | ----------------------------------------------- |
-| `--init`  | Generate random credentials and save to `.env`  |
-| `--force` | Used with `--init` to overwrite existing `.env` |
+| Option    | Description                                                   |
+| --------- | ------------------------------------------------------------- |
+| `--init`  | Generate the owner authorization secret and save it to `.env` |
+| `--force` | Used with `--init` to overwrite existing `.env`               |
 
 ### Environment Variables
 
 ```bash
-CLIENT_ID=myid CLIENT_SECRET=mysecret mcpfs /path/to/dir
+MCP_AUTH_SECRET=my-owner-secret mcpfs /path/to/dir
 
 # With custom port
-PORT=8080 CLIENT_ID=myid CLIENT_SECRET=mysecret mcpfs /path/to/dir
+PORT=8080 MCP_AUTH_SECRET=my-owner-secret mcpfs /path/to/dir
 ```
 
-| Variable           | Required | Default                   | Description                             |
-| ------------------ | -------- | ------------------------- | --------------------------------------- |
-| `CLIENT_ID`        | Yes      | -                         | OAuth client ID                         |
-| `CLIENT_SECRET`    | Yes      | -                         | OAuth client secret                     |
-| `PORT`             | No       | 24024                     | Server port                             |
-| `OAUTH_STATE_PATH` | No       | `.mcpfs/oauth-state.json` | Persistent OAuth state file             |
-| `PUBLIC_URL`       | No       | Derived from request      | Public HTTPS URL used in OAuth metadata |
-| `TRUST_PROXY`      | No       | `false`                   | Trust reverse-proxy forwarded headers   |
+| Variable           | Required          | Default | Description                                        |
+| ------------------ | ----------------- | ------- | -------------------------------------------------- |
+| `MCP_AUTH_SECRET`  | Yes               | -       | Private secret required on the OAuth consent page  |
+| `PORT`             | No                | 24024   | Server port                                        |
+| `MCP_PUBLIC_URL`   | Proxy deployments | -       | Canonical public origin used in OAuth metadata     |
+| `OAUTH_STATE_PATH` | No                | -       | JSON file used to persist OAuth clients and tokens |
+
+Back up the synchronized directory independently of mcpfs (for example with
+Restic or filesystem snapshots). A backup job must cover changes received by
+Syncthing as well as changes made through MCP, because neither mcpfs nor
+Syncthing is a complete backup system.
+
+### Linux: native Syncthing service
+
+The recommended deployment runs Syncthing on the Linux host as the `repryty`
+user. Keep its configuration and database in that user's home directory, and
+share only the vault directory with the MCPFS container.
+
+1. Install Syncthing using your distribution's package or the official
+   repository. Enable lingering so the user service continues without an
+   interactive login:
+
+   ```bash
+   sudo loginctl enable-linger repryty
+   sudo -u repryty XDG_RUNTIME_DIR=/run/user/$(id -u repryty) \
+     systemctl --user enable --now syncthing.service
+   ```
+
+2. Open the Syncthing GUI on the host (normally `http://127.0.0.1:8384`),
+   add the Obsidian devices, and create a folder such as `obsidian-vault`
+   with path `/srv/obsidian/mcp-vault`. Set the folder type to **Send &
+   Receive** only after the initial migration has been checked.
+
+3. Ensure `repryty` can read and write the vault and that the container's
+   runtime UID can write it as well. Do not put Syncthing's `.stfolder` or
+   configuration directory inside the MCPFS OAuth directory.
+
+4. On every Obsidian device, disable the old Self-hosted LiveSync plugin
+   before enabling Syncthing for this vault. Never run both synchronizers on
+   the same files.
+
+For the first migration, stop writes, finish the last LiveSync pull, make a
+backup, and use the server copy as the initial Syncthing folder. Connect one
+device at a time and verify the file count and representative file contents
+before enabling additional writers. Syncthing can create `sync-conflict-*`
+files when two devices edit the same file; resolve those in Obsidian and keep
+the backup job enabled.
+
+### Docker Compose (MCPFS only)
+
+Syncthing remains a native Linux user service; the Compose service below only
+bind-mounts its host-synchronized directory into MCPFS. Copy it to
+`docker-compose.yml` and set the referenced variables in the deployment
+environment (do not commit the deployment `.env`).
+
+```yaml
+services:
+  mcpfs:
+    build: .
+    container_name: obsidian-mcpfs
+    restart: unless-stopped
+    init: true
+    environment:
+      MCP_AUTH_SECRET: ${MCPFS_AUTH_SECRET:?Set MCPFS_AUTH_SECRET externally}
+      MCP_PUBLIC_URL: ${MCPFS_PUBLIC_URL:?Set MCPFS_PUBLIC_URL externally}
+      OAUTH_STATE_PATH: /var/lib/mcpfs/oauth-state.json
+      PORT: "24024"
+    volumes:
+      - ./mcpfs/oauth:/var/lib/mcpfs:rw
+      - ${OBSIDIAN_VAULT_PATH:?Set OBSIDIAN_VAULT_PATH}:/srv/obsidian/vault:rw
+    command: ["/srv/obsidian/vault"]
+    networks:
+      - risu_net
+
+networks:
+  risu_net:
+    external: true
+```
+
+The reverse proxy or tunnel should forward to port `24024` and use the same
+origin as `MCP_PUBLIC_URL`. The `MCP_AUTH_SECRET` is used only on the OAuth
+consent page; it is not a Syncthing credential.
 
 ---
 
@@ -186,20 +275,6 @@ PORT=8080 CLIENT_ID=myid CLIENT_SECRET=mysecret mcpfs /path/to/dir
 
 This server supports OAuth 2.1 with multiple authentication flows:
 
-### Token persistence
-
-Access and refresh tokens survive a normal process restart. OAuth state is stored in
-`.mcpfs/oauth-state.json` by default, or at the path specified by `OAUTH_STATE_PATH`.
-The file is created with owner-only permissions where supported, written atomically,
-and contains SHA-256 hashes of tokens and client secrets rather than their plaintext
-values. Keep the state directory private and back it up only as securely as your
-`.env` file. Pending authorization codes remain intentionally short-lived and are
-discarded on restart.
-
-For a multi-process or multi-host deployment, use a shared transactional store and
-an external key-management policy; this built-in file store is for a single server
-process.
-
 ### Authorization Code Flow with PKCE (Recommended)
 
 Used by ChatGPT and other MCP clients. The flow is:
@@ -209,27 +284,6 @@ Used by ChatGPT and other MCP clients. The flow is:
 3. Client redirects to `/authorize` with PKCE challenge
 4. Server redirects back with authorization code
 5. Client exchanges code for tokens at `/token`
-
-### Client Credentials Flow (Machine-to-Machine)
-
-For direct API access without user interaction:
-
-```bash
-curl -X POST http://localhost:24024/token \
-  -d "grant_type=client_credentials" \
-  -d "client_id=YOUR_CLIENT_ID" \
-  -d "client_secret=YOUR_CLIENT_SECRET"
-```
-
-Response:
-
-```json
-{
-  "access_token": "abc123...",
-  "token_type": "Bearer",
-  "expires_in": 3600
-}
-```
 
 ### Using the Token
 
@@ -254,7 +308,8 @@ curl -X POST http://localhost:24024/mcp \
 
 ## Directory Access Control
 
-The server uses a flexible directory access control system.
+The server uses a fixed directory access control system for the synchronized
+vault.
 
 ### Method 1: Command-line Arguments
 
@@ -262,17 +317,13 @@ The server uses a flexible directory access control system.
 mcpfs /path/to/dir1 /path/to/dir2
 ```
 
-### Method 2: MCP Roots (Recommended)
-
-MCP clients that support [Roots](https://modelcontextprotocol.io/docs/learn/client-concepts#roots) can dynamically update the allowed directories.
-
 ### How It Works
 
-1. **Server Startup** - Server starts with directories from command-line arguments
+1. **Server Startup** - Server starts with the configured vault directory
 2. **Client Connection** - Client connects and sends `initialize` request
-3. **Roots Protocol** - If client supports roots, server uses client's roots
-4. **Fallback** - If client doesn't support roots, server uses command-line directories
-5. **Access Control** - All filesystem operations are restricted to allowed directories
+3. **Filesystem access** - Reads and writes use the local directory directly
+4. **Synchronization** - Syncthing independently propagates filesystem changes
+5. **Access Control** - All filesystem operations are restricted to the vault
 
 ---
 
@@ -315,10 +366,6 @@ MCP clients that support [Roots](https://modelcontextprotocol.io/docs/learn/clie
   - List directory with file sizes
   - Inputs: `path` (string), `sortBy` ("name" | "size")
 
-- **move_file**
-  - Move or rename files and directories
-  - Inputs: `source` (string), `destination` (string)
-
 - **search_files**
   - Recursively search for files matching patterns
   - Inputs: `path`, `pattern`, `excludePatterns`
@@ -351,16 +398,15 @@ MCP clients that support [Roots](https://modelcontextprotocol.io/docs/learn/clie
 | `create_directory`          | `false`      | `true`         | `false`         |
 | `write_file`                | `false`      | `true`         | `true`          |
 | `edit_file`                 | `false`      | `false`        | `true`          |
-| `move_file`                 | `false`      | `false`        | `false`         |
 
 ---
 
 ## Security
 
 - **OAuth 2.1 authentication** with PKCE for authorization code flow
-- Access and refresh tokens are persisted as one-way hashes with owner-only file permissions
 - **Refresh token rotation** - tokens are rotated on each refresh (OAuth 2.1 requirement)
-- Only directories specified at startup (or via MCP Roots) are accessible
+- `MCP_AUTH_SECRET` is required on the consent form before an authorization code is issued
+- Only the configured synchronized vault is accessible; client Roots cannot expand it
 - Symlinks are resolved to prevent directory escape attacks
 
 ## License

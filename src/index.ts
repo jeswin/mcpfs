@@ -4,27 +4,18 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { InMemoryEventStore } from "@modelcontextprotocol/sdk/examples/shared/inMemoryEventStore.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { RootsListChangedNotificationSchema, type Root } from "@modelcontextprotocol/sdk/types.js";
 import type { Request, Response, NextFunction } from "express";
 import express from "express";
 import cors from "cors";
-import { randomUUID, createHash, randomBytes } from "node:crypto";
+import { randomUUID, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "fs/promises";
 import { createReadStream, existsSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import readline from "readline";
 import { z } from "zod";
 import { minimatch } from "minimatch";
 import { normalizePath, expandHome } from "./path-utils.js";
-import { getValidRootDirectories } from "./roots-utils.js";
 import { logger } from "./logger.js";
-import {
-  createOAuthStateStore,
-  hashClientSecret,
-  type OAuthStateStore,
-  type RegisteredClient,
-} from "./oauth-store.js";
 import {
   // Function imports
   formatSize,
@@ -45,20 +36,16 @@ const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, "..");
 const envPath = path.join(projectRoot, ".env");
 
-// Generate random credentials
-function generateRandomCredentials(): { clientId: string; clientSecret: string } {
-  return {
-    clientId: randomBytes(16).toString("hex"),
-    clientSecret: randomBytes(32).toString("hex"),
-  };
+// Generate the owner-only authorization secret.
+function generateRandomCredentials(): { authSecret: string } {
+  return { authSecret: randomBytes(32).toString("hex") };
 }
 
-// Create .env file with random credentials
-async function createEnvFile(): Promise<{ clientId: string; clientSecret: string }> {
+// Create .env file with the owner-only authorization secret.
+async function createEnvFile(): Promise<{ authSecret: string }> {
   const credentials = generateRandomCredentials();
-  const envContent = `# OAuth Client Credentials (required)
-CLIENT_ID=${credentials.clientId}
-CLIENT_SECRET=${credentials.clientSecret}
+  const envContent = `# Owner-only secret required on the OAuth consent page.
+MCP_AUTH_SECRET=${credentials.authSecret}
 
 # Server configuration (optional)
 PORT=24024
@@ -90,21 +77,6 @@ async function loadEnvFile(): Promise<void> {
   }
 }
 
-// Ask user a yes/no question
-async function askYesNo(question: string): Promise<boolean> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.toLowerCase() === "y" || answer.toLowerCase() === "yes");
-    });
-  });
-}
-
 // Handle --init flag
 const rawArgs = process.argv.slice(2);
 const hasInit = rawArgs.includes("--init");
@@ -117,10 +89,10 @@ if (hasInit) {
     process.exit(1);
   }
 
-  await createEnvFile();
-  logger.info("Created .env file with random credentials.");
-  logger.info(`File location: ${envPath} (permissions restricted to the current user)`);
-  logger.info("Read the credentials from that file when configuring your OAuth client.");
+  const credentials = await createEnvFile();
+  logger.info("Created .env file with the owner authorization secret:");
+  logger.info(`  MCP_AUTH_SECRET=${credentials.authSecret}`);
+  logger.info(`File location: ${envPath}`);
   logger.info("You can now start the server with:");
   logger.info("  node dist/index.js /path/to/allowed/directory");
   process.exit(0);
@@ -129,59 +101,16 @@ if (hasInit) {
 // Load .env file if it exists
 await loadEnvFile();
 
-// Check for credentials, prompt to create if missing
-let CLIENT_ID = process.env.CLIENT_ID;
-let CLIENT_SECRET = process.env.CLIENT_SECRET;
+const MCP_AUTH_SECRET = process.env.MCP_AUTH_SECRET;
 
-if (!CLIENT_ID || !CLIENT_SECRET) {
-  logger.warn("Missing required environment variables: CLIENT_ID and CLIENT_SECRET");
-
-  if (existsSync(envPath)) {
-    logger.error(".env file exists but CLIENT_ID or CLIENT_SECRET is not set.");
-    logger.info(`Please check your .env file at: ${envPath}`);
-    process.exit(1);
-  }
-
-  // Check if stdin is a TTY (interactive terminal)
-  if (process.stdin.isTTY) {
-    const shouldCreate = await askYesNo(
-      "Would you like to create .env with random credentials? (y/n): "
-    );
-
-    if (shouldCreate) {
-      const credentials = await createEnvFile();
-      CLIENT_ID = credentials.clientId;
-      CLIENT_SECRET = credentials.clientSecret;
-
-      logger.info("Created .env file with random credentials.");
-      logger.info(`File location: ${envPath} (permissions restricted to the current user)`);
-    } else {
-      logger.info("Please create .env from .env.example or set environment variables.");
-      logger.info("You can also use: node dist/index.js --init");
-      process.exit(1);
-    }
-  } else {
-    logger.info("Not running in interactive mode.");
-    logger.info("Please either:");
-    logger.info("  1. Run with --init to create .env: node dist/index.js --init");
-    logger.info("  2. Create .env file manually (see .env.example)");
-    logger.info("  3. Set CLIENT_ID and CLIENT_SECRET environment variables");
-    process.exit(1);
-  }
-}
-
-// OAuth state is persisted so issued tokens survive a process restart. The
-// persisted file contains only hashes of secrets, never bearer token values.
-const oauthStatePath = path.resolve(
-  process.env.OAUTH_STATE_PATH || path.join(projectRoot, ".mcpfs", "oauth-state.json")
-);
-const oauthState = createOAuthStateStore(oauthStatePath);
-try {
-  await oauthState.load();
-} catch (error) {
-  logger.error(`Could not load OAuth state from ${oauthStatePath}`, error);
+if (!MCP_AUTH_SECRET) {
+  logger.error("Missing required environment variable: MCP_AUTH_SECRET");
   process.exit(1);
 }
+
+// Token storage (in production, use Redis or similar)
+const accessTokens: Map<string, { expiresAt: number }> = new Map();
+const refreshTokens: Map<string, { clientId: string; expiresAt: number }> = new Map();
 
 // Authorization code storage for PKCE flow
 type AuthorizationCode = {
@@ -207,24 +136,186 @@ const pendingAuthorizations: Map<string, PendingAuthorization> = new Map();
 const PENDING_AUTH_EXPIRATION_MS = 10 * 60 * 1000; // 10 minutes
 
 // Dynamic client registration storage
-// Pre-register the static client from environment variables
-// This is for machine-to-machine access (client_credentials flow) and local testing
-// ChatGPT and other MCP clients use dynamic registration and provide their own redirect URIs
-if (CLIENT_ID) {
-  await oauthState.registerClient({
-    clientId: CLIENT_ID,
-    clientSecretHash: hashClientSecret(CLIENT_SECRET),
-    redirectUris: ["http://localhost:3000/callback", "http://127.0.0.1:3000/callback"],
-    clientName: "Static Admin Client",
-    createdAt: Date.now(),
-  });
-  logger.info(`Pre-registered static client: ${CLIENT_ID}`);
-}
+type RegisteredClient = {
+  clientId: string;
+  clientSecret?: string | undefined;
+  tokenEndpointAuthMethod: "none" | "client_secret_post" | "client_secret_basic";
+  redirectUris: string[];
+  clientName?: string | undefined;
+  createdAt: number;
+};
+const registeredClients: Map<string, RegisteredClient> = new Map();
 
 // Token expiration times
 const TOKEN_EXPIRATION_MS = 60 * 60 * 1000; // 1 hour
 const REFRESH_TOKEN_EXPIRATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const AUTH_CODE_EXPIRATION_MS = 10 * 60 * 1000; // 10 minutes
+
+const oauthStatePathValue = process.env.OAUTH_STATE_PATH?.trim();
+if (oauthStatePathValue && !path.isAbsolute(oauthStatePathValue)) {
+  throw new Error("OAUTH_STATE_PATH must be an absolute path when set");
+}
+const oauthStatePath = oauthStatePathValue ? path.resolve(oauthStatePathValue) : undefined;
+let oauthStateWriteQueue: Promise<void> = Promise.resolve();
+
+const expiringTokenSchema = z.object({ expiresAt: z.number().finite() });
+const refreshTokenSchema = z.object({
+  clientId: z.string(),
+  expiresAt: z.number().finite(),
+});
+const authorizationCodeSchema = z.object({
+  clientId: z.string(),
+  redirectUri: z.string(),
+  codeChallenge: z.string(),
+  codeChallengeMethod: z.string(),
+  expiresAt: z.number().finite(),
+});
+const pendingAuthorizationSchema = z.object({
+  clientId: z.string(),
+  redirectUri: z.string(),
+  state: z.string().optional(),
+  codeChallenge: z.string(),
+  codeChallengeMethod: z.string(),
+  expiresAt: z.number().finite(),
+});
+const registeredClientSchema = z.object({
+  clientId: z.string(),
+  clientSecret: z.string().optional(),
+  tokenEndpointAuthMethod: z.enum(["none", "client_secret_post", "client_secret_basic"]),
+  redirectUris: z.array(z.string()),
+  clientName: z.string().optional(),
+  createdAt: z.number().finite(),
+});
+const oauthStateSchema = z.object({
+  version: z.literal(1),
+  accessTokens: z.array(z.tuple([z.string(), expiringTokenSchema])),
+  refreshTokens: z.array(z.tuple([z.string(), refreshTokenSchema])),
+  authorizationCodes: z.array(z.tuple([z.string(), authorizationCodeSchema])),
+  pendingAuthorizations: z.array(z.tuple([z.string(), pendingAuthorizationSchema])),
+  registeredClients: z.array(z.tuple([z.string(), registeredClientSchema])),
+});
+
+function getOAuthStateSnapshot() {
+  return {
+    version: 1 as const,
+    accessTokens: [...accessTokens.entries()],
+    refreshTokens: [...refreshTokens.entries()],
+    authorizationCodes: [...authorizationCodes.entries()],
+    pendingAuthorizations: [...pendingAuthorizations.entries()],
+    registeredClients: [...registeredClients.entries()],
+  };
+}
+
+async function writeOAuthState(): Promise<void> {
+  if (!oauthStatePath) return;
+
+  const snapshot = getOAuthStateSnapshot();
+  const stateDirectory = path.dirname(oauthStatePath);
+  await fs.mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+  await fs.chmod(stateDirectory, 0o700);
+  const temporaryPath = `${oauthStatePath}.${randomBytes(16).toString("hex")}.tmp`;
+
+  try {
+    await fs.writeFile(temporaryPath, `${JSON.stringify(snapshot, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    await fs.rename(temporaryPath, oauthStatePath);
+  } catch (error) {
+    try {
+      await fs.unlink(temporaryPath);
+    } catch {
+      // Ignore cleanup errors and preserve the original write failure.
+    }
+    throw error;
+  }
+}
+
+function persistOAuthState(): Promise<void> {
+  const write = oauthStateWriteQueue.then(writeOAuthState, writeOAuthState);
+  oauthStateWriteQueue = write.catch(() => undefined);
+  return write;
+}
+
+async function loadOAuthState(): Promise<void> {
+  if (!oauthStatePath) {
+    logger.warn("OAUTH_STATE_PATH is not set; OAuth state will not survive a restart");
+    return;
+  }
+
+  let content: string;
+  try {
+    content = await fs.readFile(oauthStatePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      logger.info(`OAuth state file will be created at ${oauthStatePath}`);
+      return;
+    }
+    throw error;
+  }
+
+  const state = oauthStateSchema.parse(JSON.parse(content) as unknown);
+  const now = Date.now();
+
+  for (const [token, value] of state.accessTokens) {
+    if (value.expiresAt > now) accessTokens.set(token, value);
+  }
+  for (const [token, value] of state.refreshTokens) {
+    if (value.expiresAt > now) refreshTokens.set(token, value);
+  }
+  for (const [code, value] of state.authorizationCodes) {
+    if (value.expiresAt > now) authorizationCodes.set(code, value);
+  }
+  for (const [csrfToken, value] of state.pendingAuthorizations) {
+    if (value.expiresAt > now) {
+      pendingAuthorizations.set(csrfToken, { ...value, state: value.state });
+    }
+  }
+  for (const [clientId, value] of state.registeredClients) {
+    registeredClients.set(clientId, {
+      ...value,
+      clientSecret: value.clientSecret,
+      clientName: value.clientName,
+    });
+  }
+
+  logger.info(
+    `Loaded OAuth state: ${registeredClients.size} clients, ${accessTokens.size} access tokens, ${refreshTokens.size} refresh tokens`
+  );
+
+  await persistOAuthState();
+}
+
+await loadOAuthState();
+
+async function persistOAuthStateForResponse(res: Response): Promise<boolean> {
+  try {
+    await persistOAuthState();
+    return true;
+  } catch (error) {
+    logger.error("Failed to persist OAuth state", error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: "server_error",
+        error_description: "Failed to persist OAuth state",
+      });
+    }
+    return false;
+  }
+}
+
+// Generate access token
+function generateAccessToken(): string {
+  return createHash("sha256")
+    .update(randomUUID() + Date.now().toString())
+    .digest("hex");
+}
+
+// Generate refresh token
+function generateRefreshToken(): string {
+  return randomBytes(32).toString("hex");
+}
 
 // Base64URL encode for PKCE
 function base64UrlEncode(buffer: Buffer): string {
@@ -242,23 +333,61 @@ function verifyCodeChallenge(codeVerifier: string, codeChallenge: string, method
   return codeVerifier === codeChallenge;
 }
 
-// Get server URL from request
-const configuredPublicUrl = process.env.PUBLIC_URL?.replace(/\/+$/, "");
-if (configuredPublicUrl) {
-  let parsedPublicUrl: URL;
-  try {
-    parsedPublicUrl = new URL(configuredPublicUrl);
-  } catch {
-    throw new Error("PUBLIC_URL must be an absolute HTTP(S) URL");
+function verifyMcpAuthSecret(candidate: unknown): boolean {
+  if (typeof candidate !== "string" || !MCP_AUTH_SECRET) return false;
+  const expected = Buffer.from(MCP_AUTH_SECRET, "utf8");
+  const received = Buffer.from(candidate, "utf8");
+  return expected.length === received.length && timingSafeEqual(expected, received);
+}
+
+type TokenClientCredentials = {
+  clientId?: string;
+  clientSecret?: string;
+};
+
+function readTokenClientCredentials(req: Request): TokenClientCredentials {
+  const credentials: TokenClientCredentials = {};
+  if (typeof req.body.client_id === "string") credentials.clientId = req.body.client_id;
+  if (typeof req.body.client_secret === "string") {
+    credentials.clientSecret = req.body.client_secret;
   }
-  if (parsedPublicUrl.protocol !== "http:" && parsedPublicUrl.protocol !== "https:") {
-    throw new Error("PUBLIC_URL must use HTTP or HTTPS");
+
+  const authorization = req.headers.authorization;
+  if (!credentials.clientId && authorization?.startsWith("Basic ")) {
+    try {
+      const decoded = Buffer.from(authorization.slice("Basic ".length), "base64").toString("utf8");
+      const separator = decoded.indexOf(":");
+      if (separator > 0) {
+        credentials.clientId = decodeURIComponent(decoded.slice(0, separator));
+        credentials.clientSecret = decodeURIComponent(decoded.slice(separator + 1));
+      }
+    } catch {
+      // The token endpoint will return invalid_client below.
+    }
+  }
+
+  return credentials;
+}
+
+function isAllowedRedirectUri(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2048) return false;
+  try {
+    const uri = new URL(value);
+    if (uri.username || uri.password || uri.hash) return false;
+    if (uri.protocol === "https:") return uri.hostname.length > 0;
+    return uri.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(uri.hostname);
+  } catch {
+    return false;
   }
 }
 
-function getServerUrl(req: Request): string {
-  if (configuredPublicUrl) return configuredPublicUrl;
-  return `${req.protocol}://${req.get("host") || "localhost"}`;
+function isAllowedRedirectUriList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= 20 &&
+    value.every((uri) => isAllowedRedirectUri(uri))
+  );
 }
 
 function escapeHtml(value: string): string {
@@ -275,33 +404,48 @@ function escapeHtml(value: string): string {
   );
 }
 
-function isAllowedRedirectUri(value: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 2048) return false;
-  if (value.includes("*")) return false;
-
-  try {
-    const uri = new URL(value);
-    if (uri.username || uri.password || uri.hash) return false;
-    if (uri.protocol === "https:") return uri.hostname.length > 0;
-    if (uri.protocol !== "http:") return false;
-    return ["localhost", "127.0.0.1", "[::1]"].includes(uri.hostname.toLowerCase());
-  } catch {
-    return false;
-  }
+function verifyRegisteredClient(clientId: string, clientSecret?: string): boolean {
+  const client = registeredClients.get(clientId);
+  if (!client) return false;
+  if (client.tokenEndpointAuthMethod === "none") return true;
+  if (!client.clientSecret || typeof clientSecret !== "string") return false;
+  const expected = Buffer.from(client.clientSecret, "utf8");
+  const received = Buffer.from(clientSecret, "utf8");
+  return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
-function isAllowedRedirectUriList(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) &&
-    value.length > 0 &&
-    value.length <= 20 &&
-    value.every((uri) => isAllowedRedirectUri(uri))
-  );
+// Get server URL from request
+function getServerUrl(req: Request): string {
+  const configured = process.env.MCP_PUBLIC_URL?.replace(/\/+$/, "");
+  if (configured) return configured;
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
+  return `${protocol}://${host}`;
+}
+
+function getMcpResourceUrl(req: Request): string {
+  return `${getServerUrl(req)}/mcp`;
+}
+
+function getProtectedResourceMetadataUrl(req: Request): string {
+  return `${getServerUrl(req)}/.well-known/oauth-protected-resource`;
+}
+
+function setBearerChallenge(req: Request, res: Response, error?: string): void {
+  const parameters = [`resource_metadata="${getProtectedResourceMetadataUrl(req)}"`];
+  if (error) parameters.unshift(`error="${error}"`);
+  res.setHeader("WWW-Authenticate", `Bearer ${parameters.join(", ")}`);
 }
 
 // Validate access token
 function validateAccessToken(token: string): boolean {
-  return oauthState.validateAccessToken(token);
+  const tokenData = accessTokens.get(token);
+  if (!tokenData) return false;
+  if (Date.now() > tokenData.expiresAt) {
+    accessTokens.delete(token);
+    return false;
+  }
+  return true;
 }
 
 // Auth middleware
@@ -309,6 +453,7 @@ function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    setBearerChallenge(req, res);
     res.status(401).json({
       error: "unauthorized",
       error_description: "Missing or invalid Authorization header. Use Bearer token.",
@@ -318,6 +463,7 @@ function authMiddleware(req: Request, res: Response, next: NextFunction): void {
 
   const token = authHeader.substring(7);
   if (!validateAccessToken(token)) {
+    setBearerChallenge(req, res, "invalid_token");
     res.status(401).json({
       error: "invalid_token",
       error_description: "Access token is invalid or expired.",
@@ -395,7 +541,7 @@ if (args.length === 0) {
 }
 
 // Store allowed directories in normalized and resolved form
-let allowedDirectories = await Promise.all(
+const allowedDirectories = await Promise.all(
   args.map(async (dir) => {
     const expanded = expandHome(dir);
     const absolute = path.resolve(expanded);
@@ -475,11 +621,6 @@ type DirectoryTreeArgs = {
   excludePatterns?: string[] | undefined;
 };
 
-type MoveFileArgs = {
-  source: string;
-  destination: string;
-};
-
 type SearchFilesArgs = {
   path: string;
   pattern: string;
@@ -517,7 +658,6 @@ function createServer() {
 
   // Tool registrations
 
-  // read_file (deprecated) and read_text_file
   const readTextFileHandler = async (args: ReadTextFileArgs) => {
     const validPath = await validatePath(args.path);
 
@@ -539,29 +679,6 @@ function createServer() {
       structuredContent: { content },
     };
   };
-
-  server.registerTool(
-    "read_file",
-    {
-      title: "Read File (Deprecated)",
-      description:
-        "Read the complete contents of a file as text. DEPRECATED: Use read_text_file instead.",
-      inputSchema: {
-        path: z.string(),
-        tail: z
-          .number()
-          .optional()
-          .describe("If provided, returns only the last N lines of the file"),
-        head: z
-          .number()
-          .optional()
-          .describe("If provided, returns only the first N lines of the file"),
-      },
-      outputSchema: { content: z.string() },
-      annotations: { readOnlyHint: true },
-    },
-    readTextFileHandler
-  );
 
   server.registerTool(
     "read_text_file",
@@ -737,7 +854,14 @@ function createServer() {
     },
     async (args: EditFileArgs) => {
       const validPath = await validatePath(args.path);
-      const result = await applyFileEdits(validPath, args.edits, args.dryRun);
+      if (args.dryRun) {
+        const result = await applyFileEdits(validPath, args.edits, true);
+        return {
+          content: [{ type: "text" as const, text: result }],
+          structuredContent: { content: result },
+        };
+      }
+      const result = await applyFileEdits(validPath, args.edits, false);
       return {
         content: [{ type: "text" as const, text: result }],
         structuredContent: { content: result },
@@ -961,35 +1085,6 @@ function createServer() {
   );
 
   server.registerTool(
-    "move_file",
-    {
-      title: "Move File",
-      description:
-        "Move or rename files and directories. Can move files between directories " +
-        "and rename them in a single operation. If the destination exists, the " +
-        "operation will fail. Works across different directories and can be used " +
-        "for simple renaming within the same directory. Both source and destination must be within allowed directories.",
-      inputSchema: {
-        source: z.string(),
-        destination: z.string(),
-      },
-      outputSchema: { content: z.string() },
-      annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false },
-    },
-    async (args: MoveFileArgs) => {
-      const validSourcePath = await validatePath(args.source);
-      const validDestPath = await validatePath(args.destination);
-      await fs.rename(validSourcePath, validDestPath);
-      const text = `Successfully moved ${args.source} to ${args.destination}`;
-      const contentBlock = { type: "text" as const, text };
-      return {
-        content: [contentBlock],
-        structuredContent: { content: text },
-      };
-    }
-  );
-
-  server.registerTool(
     "search_files",
     {
       title: "Search Files",
@@ -1070,48 +1165,9 @@ function createServer() {
     }
   );
 
-  // Updates allowed directories based on MCP client roots
-  async function updateAllowedDirectoriesFromRoots(requestedRoots: Root[]) {
-    const validatedRootDirs = await getValidRootDirectories(requestedRoots);
-    if (validatedRootDirs.length > 0) {
-      allowedDirectories = [...validatedRootDirs];
-      setAllowedDirectories(allowedDirectories); // Update the global state in lib.ts
-      logger.info(
-        `Updated allowed directories from MCP roots: ${validatedRootDirs.length} valid directories`
-      );
-    } else {
-      logger.warn("No valid root directories provided by client");
-    }
-  }
-
-  // Handles dynamic roots updates during runtime
-  server.server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
-    try {
-      const response = await server.server.listRoots();
-      if (response && "roots" in response) {
-        await updateAllowedDirectoriesFromRoots(response.roots);
-      }
-    } catch (err) {
-      logger.error("Failed to request roots from client", err);
-    }
-  });
-
-  // Handles post-initialization setup
-  server.server.oninitialized = async () => {
-    const clientCapabilities = server.server.getClientCapabilities();
-
-    if (clientCapabilities?.roots) {
-      try {
-        const response = await server.server.listRoots();
-        if (response && "roots" in response) {
-          await updateAllowedDirectoriesFromRoots(response.roots);
-        } else {
-          logger.warn("Client returned no roots set, keeping current settings");
-        }
-      } catch (err) {
-        logger.error("Failed to request initial roots from client", err);
-      }
-    } else {
+  // MCP Roots are intentionally ignored. The server exposes only the
+  // operator-selected synchronized directory passed at startup.
+  /*
       if (allowedDirectories.length > 0) {
         logger.info(
           `Client does not support MCP Roots, using allowed directories set from server args: ${allowedDirectories.join(", ")}`
@@ -1121,16 +1177,12 @@ function createServer() {
           `Server cannot operate: No allowed directories available. Server was started without command-line directories and client either does not support MCP roots protocol or provided empty roots. Please either: 1) Start server with directory arguments, or 2) Use a client that supports MCP roots protocol and provides valid root directories.`
         );
       }
-    }
-  };
-
+    */
   return server;
 }
 
 // Express app setup
 const app = express();
-// Forwarded headers are ignored unless the operator explicitly trusts a proxy.
-app.set("trust proxy", process.env.TRUST_PROXY === "true");
 app.use(
   cors({
     origin: "*",
@@ -1144,14 +1196,16 @@ app.use(
 // OAuth 2.1 Discovery Endpoints (RFC 9728, RFC 8414)
 
 // Protected Resource Metadata (RFC 9728)
-app.get("/.well-known/oauth-protected-resource", (req: Request, res: Response) => {
+const protectedResourceMetadataHandler = (req: Request, res: Response): void => {
   const serverUrl = getServerUrl(req);
   res.json({
-    resource: serverUrl,
+    resource: getMcpResourceUrl(req),
     authorization_servers: [serverUrl],
     bearer_methods_supported: ["header"],
   });
-});
+};
+app.get("/.well-known/oauth-protected-resource", protectedResourceMetadataHandler);
+app.get("/.well-known/oauth-protected-resource/mcp", protectedResourceMetadataHandler);
 
 // Authorization Server Metadata (RFC 8414)
 app.get("/.well-known/oauth-authorization-server", (req: Request, res: Response) => {
@@ -1162,8 +1216,9 @@ app.get("/.well-known/oauth-authorization-server", (req: Request, res: Response)
     token_endpoint: `${serverUrl}/token`,
     registration_endpoint: `${serverUrl}/register`,
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code", "refresh_token", "client_credentials"],
-    token_endpoint_auth_methods_supported: ["client_secret_post"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    scopes_supported: ["offline_access"],
+    token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"],
     code_challenge_methods_supported: ["S256"],
     service_documentation: "https://github.com/jeswin/mcpfs",
   });
@@ -1176,55 +1231,61 @@ app.post("/register", express.json(), async (req: Request, res: Response) => {
   if (!isAllowedRedirectUriList(redirect_uris)) {
     res.status(400).json({
       error: "invalid_redirect_uri",
-      error_description:
-        "At least one exact HTTPS or loopback HTTP redirect_uri is required; wildcards are not supported",
+      error_description: "redirect_uris must contain one to twenty valid HTTP(S) URIs",
     });
     return;
   }
 
-  if (client_name !== undefined && (typeof client_name !== "string" || client_name.length > 100)) {
+  if (client_name !== undefined && (typeof client_name !== "string" || client_name.length > 200)) {
     res.status(400).json({
       error: "invalid_client_metadata",
-      error_description: "client_name must be a string of at most 100 characters",
+      error_description: "client_name must be a string of at most 200 characters",
     });
     return;
   }
 
+  const requestedAuthMethod = req.body.token_endpoint_auth_method;
+  const tokenEndpointAuthMethod =
+    requestedAuthMethod === "none" ||
+    requestedAuthMethod === "client_secret_post" ||
+    requestedAuthMethod === "client_secret_basic"
+      ? requestedAuthMethod
+      : "client_secret_post";
   const clientId = randomBytes(16).toString("hex");
-  const clientSecret = randomBytes(32).toString("hex");
+  const clientSecret =
+    tokenEndpointAuthMethod === "none" ? undefined : randomBytes(32).toString("hex");
 
-  const client: RegisteredClient = {
+  registeredClients.set(clientId, {
     clientId,
-    clientSecretHash: hashClientSecret(clientSecret),
-    redirectUris: [...redirect_uris],
-    ...(client_name === undefined ? {} : { clientName: client_name }),
+    clientSecret,
+    tokenEndpointAuthMethod,
+    redirectUris: redirect_uris,
+    clientName: client_name,
     createdAt: Date.now(),
-  };
+  });
 
-  try {
-    await oauthState.registerClient(client);
-  } catch (error) {
-    logger.error("Could not persist newly registered OAuth client", error);
-    res.status(503).json({
-      error: "temporarily_unavailable",
-      error_description: "OAuth state could not be persisted",
-    });
+  if (!(await persistOAuthStateForResponse(res))) {
+    registeredClients.delete(clientId);
     return;
   }
 
-  logger.info(`Registered new OAuth client: ${clientId}`);
+  logger.info(
+    `Registered new client: ${clientId} (${client_name || "unnamed"}), token_auth=${tokenEndpointAuthMethod}, redirects=${redirect_uris.length}`
+  );
 
-  res.status(201).json({
+  const response: Record<string, unknown> = {
     client_id: clientId,
-    client_secret: clientSecret,
     client_id_issued_at: Math.floor(Date.now() / 1000),
     redirect_uris,
     client_name,
-  });
+    token_endpoint_auth_method: tokenEndpointAuthMethod,
+  };
+  if (clientSecret) response.client_secret = clientSecret;
+  res.status(201).json(response);
 });
 
 // Authorization Endpoint with PKCE - Shows consent screen
-app.get("/authorize", (req: Request, res: Response) => {
+app.get("/authorize", async (req: Request, res: Response) => {
   const { response_type, client_id, redirect_uri, state, code_challenge, code_challenge_method } =
     req.query as Record<string, string>;
 
@@ -1240,9 +1301,9 @@ app.get("/authorize", (req: Request, res: Response) => {
   }
 
   // Check if client is registered
-  const client = oauthState.getClient(client_id);
+  const client = registeredClients.get(client_id);
   if (!client) {
-    res.status(400).send("Unknown client_id");
+    res.status(400).send(`Unknown client_id: ${client_id}`);
     return;
   }
 
@@ -1251,13 +1312,11 @@ app.get("/authorize", (req: Request, res: Response) => {
     return;
   }
 
-  // Redirect URIs are exact matches. Wildcards allow authorization codes to be
-  // redirected to an attacker-controlled origin and are intentionally rejected.
-  const isValidRedirect =
-    isAllowedRedirectUri(redirect_uri) && client.redirectUris.includes(redirect_uri);
+  // Redirect URIs are compared exactly with the values registered by the client.
+  const isValidRedirect = client.redirectUris.includes(redirect_uri);
 
   if (!isValidRedirect) {
-    res.status(400).send("Invalid redirect_uri");
+    res.status(400).send(`Invalid redirect_uri: ${redirect_uri}`);
     return;
   }
 
@@ -1281,6 +1340,11 @@ app.get("/authorize", (req: Request, res: Response) => {
     codeChallengeMethod: code_challenge_method,
     expiresAt: Date.now() + PENDING_AUTH_EXPIRATION_MS,
   });
+  if (!(await persistOAuthStateForResponse(res))) {
+    pendingAuthorizations.delete(csrfToken);
+    return;
+  }
+  logger.info(`Authorization requested for client: ${client_id}`);
 
   // Show consent screen
   const clientName = escapeHtml(client.clientName || client_id);
@@ -1392,6 +1456,10 @@ app.get("/authorize", (req: Request, res: Response) => {
     }
     .directories strong { display: block; margin-bottom: 4px; }
     .dir-list { font-family: monospace; word-break: break-all; }
+    .secret-field { margin-top: 16px; }
+    .secret-field label { display: block; color: #4a5568; font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+    .secret-field input { width: 100%; padding: 10px; border: 1px solid #cbd5e0; border-radius: 6px; }
+    .secret-field small { display: block; color: #718096; font-size: 12px; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -1403,13 +1471,13 @@ app.get("/authorize", (req: Request, res: Response) => {
       <div class="client-name">${clientName}</div>
     </div>
 
-    <div class="permissions">
+      <div class="permissions">
       <h3>This application will be able to:</h3>
       <div class="permission-item">Read files and directories</div>
-      <div class="permission-item">Write and modify files</div>
-      <div class="permission-item">Create and delete directories</div>
-      <div class="permission-item">Search and list files</div>
-    </div>
+      <div class="permission-item">Modify files in the synchronized directory</div>
+      <div class="permission-item">Create directories in the synchronized directory</div>
+        <div class="permission-item">Search and list files</div>
+      </div>
 
     <div class="directories">
       <strong>Allowed directories:</strong>
@@ -1418,9 +1486,14 @@ app.get("/authorize", (req: Request, res: Response) => {
 
     <form method="POST" action="/authorize" style="margin-top: 24px;">
       <input type="hidden" name="csrf_token" value="${csrfToken}">
+      <div class="secret-field">
+        <label for="access_secret">Private access secret</label>
+        <input id="access_secret" name="access_secret" type="password" autocomplete="off" required>
+        <small>This server's private secret is required to approve access.</small>
+      </div>
       <div class="buttons">
-        <button type="submit" name="action" value="deny" class="deny">Deny</button>
         <button type="submit" name="action" value="allow" class="allow">Allow</button>
+        <button type="submit" name="action" value="deny" class="deny" formnovalidate>Deny</button>
       </div>
     </form>
   </div>
@@ -1436,75 +1509,97 @@ app.get("/authorize", (req: Request, res: Response) => {
 });
 
 // Handle authorization form submission
-app.post("/authorize", express.urlencoded({ extended: true }), (req: Request, res: Response) => {
-  const { csrf_token, action } = req.body;
+app.post(
+  "/authorize",
+  express.urlencoded({ extended: true }),
+  async (req: Request, res: Response) => {
+    const { csrf_token, action } = req.body;
 
-  // Verify CSRF token - this proves the user saw our consent screen
-  if (!csrf_token || typeof csrf_token !== "string") {
-    res.status(400).send("Invalid request: missing CSRF token");
-    return;
-  }
+    // Verify CSRF token - this proves the user saw our consent screen
+    if (!csrf_token || typeof csrf_token !== "string") {
+      res.status(400).send("Invalid request: missing CSRF token");
+      return;
+    }
 
-  const pendingAuth = pendingAuthorizations.get(csrf_token);
-  if (!pendingAuth) {
-    res.status(400).send("Invalid or expired authorization request. Please try again.");
-    return;
-  }
+    const pendingAuth = pendingAuthorizations.get(csrf_token);
+    if (!pendingAuth) {
+      res.status(400).send("Invalid or expired authorization request. Please try again.");
+      return;
+    }
 
-  // Delete the pending auth immediately (one-time use)
-  pendingAuthorizations.delete(csrf_token);
+    // Check expiration
+    if (Date.now() > pendingAuth.expiresAt) {
+      pendingAuthorizations.delete(csrf_token);
+      logger.warn(`Expired authorization request for client: ${pendingAuth.clientId}`);
+      if (!(await persistOAuthStateForResponse(res))) return;
+      res.status(400).send("Authorization request expired. Please try again.");
+      return;
+    }
 
-  // Check expiration
-  if (Date.now() > pendingAuth.expiresAt) {
-    res.status(400).send("Authorization request expired. Please try again.");
-    return;
-  }
+    // Build redirect URL
+    const redirectUrl = new URL(pendingAuth.redirectUri);
 
-  // Build redirect URL
-  const redirectUrl = new URL(pendingAuth.redirectUri);
+    if (action !== "allow") {
+      pendingAuthorizations.delete(csrf_token);
+      logger.info(`Authorization denied for client: ${pendingAuth.clientId}`);
+      // User denied access
+      redirectUrl.searchParams.set("error", "access_denied");
+      redirectUrl.searchParams.set("error_description", "User denied the authorization request");
+      if (pendingAuth.state) redirectUrl.searchParams.set("state", pendingAuth.state);
+      if (!(await persistOAuthStateForResponse(res))) return;
+      res.redirect(redirectUrl.toString());
+      return;
+    }
 
-  if (action !== "allow") {
-    // User denied access
-    redirectUrl.searchParams.set("error", "access_denied");
-    redirectUrl.searchParams.set("error_description", "User denied the authorization request");
+    if (!verifyMcpAuthSecret(req.body.access_secret)) {
+      logger.warn(`Invalid owner secret for client: ${pendingAuth.clientId}`);
+      res.status(403).send("Access denied: invalid private access secret.");
+      return;
+    }
+
+    // Consume the pending request only after a valid approval.
+    pendingAuthorizations.delete(csrf_token);
+
+    // User approved - generate authorization code
+    const code = randomBytes(32).toString("hex");
+
+    authorizationCodes.set(code, {
+      clientId: pendingAuth.clientId,
+      redirectUri: pendingAuth.redirectUri,
+      codeChallenge: pendingAuth.codeChallenge,
+      codeChallengeMethod: pendingAuth.codeChallengeMethod,
+      expiresAt: Date.now() + AUTH_CODE_EXPIRATION_MS,
+    });
+
+    if (!(await persistOAuthStateForResponse(res))) {
+      authorizationCodes.delete(code);
+      pendingAuthorizations.set(csrf_token, pendingAuth);
+      return;
+    }
+
+    logger.info(`Authorization code issued for client: ${pendingAuth.clientId}`);
+
+    redirectUrl.searchParams.set("code", code);
     if (pendingAuth.state) redirectUrl.searchParams.set("state", pendingAuth.state);
+
+    // Do not log the redirect URL: it contains a one-time authorization code
+    // and may also contain the client's state value.
     res.redirect(redirectUrl.toString());
-    return;
   }
+);
 
-  // User approved - generate authorization code
-  const code = randomBytes(32).toString("hex");
-
-  authorizationCodes.set(code, {
-    clientId: pendingAuth.clientId,
-    redirectUri: pendingAuth.redirectUri,
-    codeChallenge: pendingAuth.codeChallenge,
-    codeChallengeMethod: pendingAuth.codeChallengeMethod,
-    expiresAt: Date.now() + AUTH_CODE_EXPIRATION_MS,
-  });
-
-  logger.info(`Authorization code issued for client: ${pendingAuth.clientId}`);
-
-  redirectUrl.searchParams.set("code", code);
-  if (pendingAuth.state) redirectUrl.searchParams.set("state", pendingAuth.state);
-
-  // Do not log the redirect URL: it contains the one-time authorization code
-  // and may also contain the client's state value.
-  res.redirect(redirectUrl.toString());
-});
-
-// Token Endpoint - Supports authorization_code, refresh_token, and client_credentials
+// Token Endpoint - Supports authorization_code and refresh_token
 app.post(
   "/token",
   express.json(),
   express.urlencoded({ extended: true }),
   async (req: Request, res: Response) => {
+    const clientCredentials = readTokenClientCredentials(req);
     const grantType = req.body.grant_type;
-    const clientId = req.body.client_id;
-    const clientSecret = req.body.client_secret;
-    logger.debug(
-      `Token request received: grant_type=${typeof grantType === "string" ? grantType : "unknown"}, ` +
-        `client_id=${typeof clientId === "string" ? clientId : "unknown"}`
+    const clientId = clientCredentials.clientId;
+    const clientSecret = clientCredentials.clientSecret;
+    logger.info(
+      `Token request received: grant_type=${grantType}, client_id=${clientId || "omitted"}`
     );
 
     // Handle authorization_code grant (OAuth 2.1 with PKCE)
@@ -1536,6 +1631,7 @@ app.post(
       if (Date.now() > authCode.expiresAt) {
         authorizationCodes.delete(code);
         logger.debug(`Token error: Authorization code has expired`);
+        if (!(await persistOAuthStateForResponse(res))) return;
         res.status(400).json({
           error: "invalid_grant",
           error_description: "Authorization code has expired",
@@ -1552,6 +1648,16 @@ app.post(
         res.status(400).json({
           error: "invalid_grant",
           error_description: "Client ID mismatch",
+        });
+        return;
+      }
+
+      const effectiveClientId = authCode.clientId;
+      if (!verifyRegisteredClient(effectiveClientId, clientSecret)) {
+        logger.warn(`Token error: invalid client credentials for ${effectiveClientId}`);
+        res.status(401).json({
+          error: "invalid_client",
+          error_description: "Invalid or missing OAuth client credentials",
         });
         return;
       }
@@ -1583,27 +1689,21 @@ app.post(
       // Delete the used authorization code (one-time use)
       authorizationCodes.delete(code);
 
+      // Generate tokens
+      const accessToken = generateAccessToken();
+      const refreshToken = generateRefreshToken();
       const expiresIn = TOKEN_EXPIRATION_MS / 1000;
-      const effectiveClientId = clientId || authCode.clientId;
 
-      let accessToken: string;
-      let refreshToken: string;
-      try {
-        const tokenPair = await oauthState.issueTokenPair(
-          effectiveClientId,
-          Date.now() + TOKEN_EXPIRATION_MS,
-          Date.now() + REFRESH_TOKEN_EXPIRATION_MS
-        );
-        accessToken = tokenPair.accessToken;
-        refreshToken = tokenPair.refreshToken;
-      } catch (error) {
-        logger.error("Could not persist OAuth tokens", error);
-        res.status(503).json({
-          error: "temporarily_unavailable",
-          error_description: "OAuth state could not be persisted",
-        });
-        return;
-      }
+      accessTokens.set(accessToken, {
+        expiresAt: Date.now() + TOKEN_EXPIRATION_MS,
+      });
+
+      refreshTokens.set(refreshToken, {
+        clientId: effectiveClientId,
+        expiresAt: Date.now() + REFRESH_TOKEN_EXPIRATION_MS,
+      });
+
+      if (!(await persistOAuthStateForResponse(res))) return;
 
       logger.info(`Access token issued for client: ${effectiveClientId} (authorization_code)`);
 
@@ -1628,7 +1728,7 @@ app.post(
         return;
       }
 
-      const storedRefresh = oauthState.getRefreshToken(refreshToken);
+      const storedRefresh = refreshTokens.get(refreshToken);
       if (!storedRefresh) {
         res.status(400).json({
           error: "invalid_grant",
@@ -1638,7 +1738,8 @@ app.post(
       }
 
       if (Date.now() > storedRefresh.expiresAt) {
-        await oauthState.deleteRefreshToken(refreshToken);
+        refreshTokens.delete(refreshToken);
+        if (!(await persistOAuthStateForResponse(res))) return;
         res.status(400).json({
           error: "invalid_grant",
           error_description: "Refresh token has expired",
@@ -1646,87 +1747,53 @@ app.post(
         return;
       }
 
-      const expiresIn = TOKEN_EXPIRATION_MS / 1000;
-
-      let rotatedTokens: Awaited<ReturnType<OAuthStateStore["rotateRefreshToken"]>>;
-      try {
-        rotatedTokens = await oauthState.rotateRefreshToken(
-          refreshToken,
-          Date.now() + TOKEN_EXPIRATION_MS,
-          Date.now() + REFRESH_TOKEN_EXPIRATION_MS
-        );
-      } catch (error) {
-        logger.error("Could not persist rotated OAuth tokens", error);
-        res.status(503).json({
-          error: "temporarily_unavailable",
-          error_description: "OAuth state could not be persisted",
-        });
-        return;
-      }
-
-      if (!rotatedTokens) {
+      const effectiveClientId = clientId || storedRefresh.clientId;
+      if (effectiveClientId !== storedRefresh.clientId) {
         res.status(400).json({
           error: "invalid_grant",
-          error_description: "Invalid or expired refresh token",
+          error_description: "Client ID mismatch",
         });
         return;
       }
-
-      logger.info(`Access token refreshed for client: ${rotatedTokens.clientId}`);
-
-      res.json({
-        access_token: rotatedTokens.accessToken,
-        token_type: "Bearer",
-        expires_in: expiresIn,
-        refresh_token: rotatedTokens.refreshToken,
-      });
-      return;
-    }
-
-    // Handle client_credentials grant (machine-to-machine)
-    if (grantType === "client_credentials") {
-      // Validate client credentials against static config or registered clients
-      const isValidClient =
-        typeof clientId === "string" &&
-        typeof clientSecret === "string" &&
-        oauthState.verifyClientSecret(clientId, clientSecret);
-
-      if (!isValidClient) {
+      if (!verifyRegisteredClient(effectiveClientId, clientSecret)) {
         res.status(401).json({
           error: "invalid_client",
-          error_description: "Invalid client_id or client_secret.",
+          error_description: "Invalid or missing OAuth client credentials",
         });
         return;
       }
 
+      // Rotate refresh token (OAuth 2.1 requirement)
+      refreshTokens.delete(refreshToken);
+      const newRefreshToken = generateRefreshToken();
+      const accessToken = generateAccessToken();
       const expiresIn = TOKEN_EXPIRATION_MS / 1000;
 
-      let accessToken: string;
-      try {
-        accessToken = await oauthState.issueAccessToken(Date.now() + TOKEN_EXPIRATION_MS);
-      } catch (error) {
-        logger.error("Could not persist OAuth access token", error);
-        res.status(503).json({
-          error: "temporarily_unavailable",
-          error_description: "OAuth state could not be persisted",
-        });
-        return;
-      }
+      accessTokens.set(accessToken, {
+        expiresAt: Date.now() + TOKEN_EXPIRATION_MS,
+      });
 
-      logger.info(`Access token issued for client: ${clientId} (client_credentials)`);
+      refreshTokens.set(newRefreshToken, {
+        clientId: storedRefresh.clientId,
+        expiresAt: Date.now() + REFRESH_TOKEN_EXPIRATION_MS,
+      });
+
+      if (!(await persistOAuthStateForResponse(res))) return;
+
+      logger.info(`Access token refreshed for client: ${storedRefresh.clientId}`);
 
       res.json({
         access_token: accessToken,
         token_type: "Bearer",
         expires_in: expiresIn,
+        refresh_token: newRefreshToken,
       });
       return;
     }
 
     res.status(400).json({
       error: "unsupported_grant_type",
-      error_description:
-        "Supported grant types: authorization_code, refresh_token, client_credentials",
+      error_description: "Supported grant types: authorization_code, refresh_token",
     });
   }
 );
