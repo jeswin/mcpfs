@@ -621,6 +621,11 @@ type DirectoryTreeArgs = {
   excludePatterns?: string[] | undefined;
 };
 
+type MoveFileArgs = {
+  source: string;
+  destination: string;
+};
+
 type SearchFilesArgs = {
   path: string;
   pattern: string;
@@ -679,6 +684,30 @@ function createServer() {
       structuredContent: { content },
     };
   };
+
+  // read_file is retained as a compatibility alias for older MCP clients.
+  server.registerTool(
+    "read_file",
+    {
+      title: "Read File (Deprecated)",
+      description:
+        "Read the complete contents of a file as text. DEPRECATED: Use read_text_file instead.",
+      inputSchema: {
+        path: z.string(),
+        tail: z
+          .number()
+          .optional()
+          .describe("If provided, returns only the last N lines of the file"),
+        head: z
+          .number()
+          .optional()
+          .describe("If provided, returns only the first N lines of the file"),
+      },
+      outputSchema: { content: z.string() },
+      annotations: { readOnlyHint: true },
+    },
+    readTextFileHandler
+  );
 
   server.registerTool(
     "read_text_file",
@@ -1079,6 +1108,31 @@ function createServer() {
       const contentBlock = { type: "text" as const, text };
       return {
         content: [contentBlock],
+        structuredContent: { content: text },
+      };
+    }
+  );
+
+  server.registerTool(
+    "move_file",
+    {
+      title: "Move File",
+      description:
+        "Move or rename files and directories. Both source and destination must be within allowed directories.",
+      inputSchema: {
+        source: z.string(),
+        destination: z.string(),
+      },
+      outputSchema: { content: z.string() },
+      annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false },
+    },
+    async (args: MoveFileArgs) => {
+      const validSourcePath = await validatePath(args.source);
+      const validDestPath = await validatePath(args.destination);
+      await fs.rename(validSourcePath, validDestPath);
+      const text = `Successfully moved ${args.source} to ${args.destination}`;
+      return {
+        content: [{ type: "text" as const, text }],
         structuredContent: { content: text },
       };
     }

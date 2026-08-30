@@ -31,7 +31,9 @@ call a synchronization API or require a particular synchronization backend.
 ## Features
 
 - Read/write files
+- Backward-compatible `read_file` alias
 - Create/list directories
+- Move files and directories
 - Search files
 - Get file metadata
 - Fixed directory access: only the configured synchronized vault is exposed
@@ -331,6 +333,10 @@ mcpfs /path/to/dir1 /path/to/dir2
 
 ### Tools
 
+- **read_file** (deprecated)
+  - Compatibility alias for `read_text_file`
+  - Inputs: `path`, `head` (optional), `tail` (optional)
+
 - **read_text_file**
   - Read complete contents of a file as text
   - Inputs:
@@ -374,6 +380,10 @@ mcpfs /path/to/dir1 /path/to/dir2
   - Get recursive JSON tree structure
   - Inputs: `path`, `excludePatterns`
 
+- **move_file**
+  - Move or rename files and directories
+  - Inputs: `source`, `destination`
+
 - **get_file_info**
   - Get detailed file/directory metadata
   - Input: `path` (string)
@@ -398,6 +408,7 @@ mcpfs /path/to/dir1 /path/to/dir2
 | `create_directory`          | `false`      | `true`         | `false`         |
 | `write_file`                | `false`      | `true`         | `true`          |
 | `edit_file`                 | `false`      | `false`        | `true`          |
+| `move_file`                 | `false`      | `false`        | `false`         |
 
 ---
 
