@@ -20,6 +20,7 @@ import {
 
 export type PolishConfig = {
   apiKey: string;
+  serviceTier: ServiceTier | undefined;
   model: string;
   templateDir: string;
   defaultTemperature: number;
@@ -28,6 +29,32 @@ export type PolishConfig = {
 };
 
 type Result<T> = { ok: true; value: T } | { ok: false; error: string };
+
+// OpenRouter service tiers (https://openrouter.ai/docs/guides/features/service-tiers).
+// "flex" routes to cheaper, lower-priority endpoints and may return capacity errors.
+const SERVICE_TIERS = [
+  "auto",
+  "default",
+  "flex",
+  "priority",
+  "fast",
+  "scale",
+  "ultrafast",
+] as const;
+type ServiceTier = (typeof SERVICE_TIERS)[number];
+
+function parseServiceTier(raw: string | undefined): Result<ServiceTier | undefined> {
+  const value = raw?.trim().toLowerCase();
+  if (!value) return { ok: true, value: undefined };
+  const tier = SERVICE_TIERS.find((candidate) => candidate === value);
+  if (!tier) {
+    return {
+      ok: false,
+      error: `OPENROUTER_SERVICE_TIER must be one of: ${SERVICE_TIERS.join(", ")}`,
+    };
+  }
+  return { ok: true, value: tier };
+}
 
 const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_TEMPLATE_DIR = "/_polish";
@@ -65,15 +92,23 @@ export function loadPolishConfig(env: NodeJS.ProcessEnv): PolishConfig | null {
     logger.warn("OPENROUTER_MODEL contains invalid characters - polishing tools disabled");
     return null;
   }
+  const serviceTier = parseServiceTier(env.OPENROUTER_SERVICE_TIER);
+  if (!serviceTier.ok) {
+    logger.warn(`${serviceTier.error} - polishing tools disabled`);
+    return null;
+  }
   const config: PolishConfig = {
     apiKey,
+    serviceTier: serviceTier.value,
     model,
     templateDir: env.POLISH_TEMPLATE_DIR?.trim() || DEFAULT_TEMPLATE_DIR,
     defaultTemperature: parseNumber(env.POLISH_TEMPERATURE, DEFAULT_TEMPERATURE, 0, 2),
     timeoutMs: parseNumber(env.POLISH_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, 1000, 600_000),
     maxChunkChars: parseNumber(env.POLISH_MAX_CHUNK_CHARS, DEFAULT_MAX_CHUNK_CHARS, 500, 100_000),
   };
-  logger.info(`Polishing tools enabled (model: ${model}, templates: ${config.templateDir})`);
+  logger.info(
+    `Polishing tools enabled (model: ${model}, service tier: ${config.serviceTier ?? "provider default"}, templates: ${config.templateDir})`
+  );
   return config;
 }
 
@@ -117,6 +152,7 @@ const openRouterErrorSchema = z.object({
 });
 
 const openRouterResponseSchema = z.object({
+  service_tier: z.string().nullable().optional(),
   choices: z
     .array(
       z.object({
@@ -156,6 +192,7 @@ async function callModel(
           { role: "user", content: text },
         ],
         temperature,
+        ...(config.serviceTier === undefined ? {} : { service_tier: config.serviceTier }),
       }),
       signal: AbortSignal.timeout(config.timeoutMs),
     });
@@ -178,7 +215,11 @@ async function callModel(
   if (!response.ok || apiError !== undefined) {
     return {
       ok: false,
-      error: `OpenRouter API error (HTTP ${response.status}): ${apiError || "unknown error"}`,
+      error:
+        `OpenRouter API error (HTTP ${response.status}): ${apiError || "unknown error"}` +
+        (config.serviceTier === "flex" && (response.status === 429 || response.status === 503)
+          ? " (flex capacity may be unavailable; retry later or unset OPENROUTER_SERVICE_TIER)"
+          : ""),
     };
   }
 
@@ -200,6 +241,11 @@ async function callModel(
       ok: false,
       error: `Model stopped early (finish reason: ${finishReason}); try a smaller POLISH_MAX_CHUNK_CHARS`,
     };
+  }
+  if (config.serviceTier !== undefined) {
+    logger.debug(
+      `OpenRouter served polish request on tier ${parsed.data.service_tier ?? "unreported"}`
+    );
   }
   return { ok: true, value: output };
 }

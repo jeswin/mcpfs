@@ -161,18 +161,19 @@ MCP_AUTH_SECRET=my-owner-secret mcpfs /path/to/dir
 PORT=8080 MCP_AUTH_SECRET=my-owner-secret mcpfs /path/to/dir
 ```
 
-| Variable                 | Required          | Default    | Description                                        |
-| ------------------------ | ----------------- | ---------- | -------------------------------------------------- |
-| `MCP_AUTH_SECRET`        | Yes               | -          | Private secret required on the OAuth consent page  |
-| `PORT`                   | No                | 24024      | Server port                                        |
-| `MCP_PUBLIC_URL`         | Proxy deployments | -          | Canonical public origin used in OAuth metadata     |
-| `OAUTH_STATE_PATH`       | No                | -          | JSON file used to persist OAuth clients and tokens |
-| `OPENROUTER_API_KEY`     | No                | -          | Enables the polishing tools (OpenRouter API key)   |
-| `OPENROUTER_MODEL`       | With API key      | -          | OpenRouter model ID, e.g. `google/<model>`         |
-| `POLISH_TEMPLATE_DIR`    | No                | `/_polish` | Vault folder that holds polish templates           |
-| `POLISH_TEMPERATURE`     | No                | 0.3        | Default sampling temperature for polishing         |
-| `POLISH_MAX_CHUNK_CHARS` | No                | 6000       | Approximate characters sent per model request      |
-| `POLISH_TIMEOUT_MS`      | No                | 120000     | Timeout per model request                          |
+| Variable                  | Required          | Default    | Description                                                    |
+| ------------------------- | ----------------- | ---------- | -------------------------------------------------------------- |
+| `MCP_AUTH_SECRET`         | Yes               | -          | Private secret required on the OAuth consent page              |
+| `PORT`                    | No                | 24024      | Server port                                                    |
+| `MCP_PUBLIC_URL`          | Proxy deployments | -          | Canonical public origin used in OAuth metadata                 |
+| `OAUTH_STATE_PATH`        | No                | -          | JSON file used to persist OAuth clients and tokens             |
+| `OPENROUTER_API_KEY`      | No                | -          | Enables the polishing tools (OpenRouter API key)               |
+| `OPENROUTER_SERVICE_TIER` | No                | -          | OpenRouter service tier, e.g. `flex` (cheaper, lower priority) |
+| `OPENROUTER_MODEL`        | With API key      | -          | OpenRouter model ID, e.g. `google/<model>`                     |
+| `POLISH_TEMPLATE_DIR`     | No                | `/_polish` | Vault folder that holds polish templates                       |
+| `POLISH_TEMPERATURE`      | No                | 0.3        | Default sampling temperature for polishing                     |
+| `POLISH_MAX_CHUNK_CHARS`  | No                | 6000       | Approximate characters sent per model request                  |
+| `POLISH_TIMEOUT_MS`       | No                | 120000     | Timeout per model request                                      |
 
 Back up the synchronized directory independently of mcpfs (for example with
 Restic or filesystem snapshots). A backup job must cover changes received by
@@ -237,6 +238,7 @@ services:
       # Optional: enables polish_file / polish_text
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+      OPENROUTER_SERVICE_TIER: ${OPENROUTER_SERVICE_TIER:-}
     volumes:
       - ./mcpfs/oauth:/var/lib/mcpfs:rw
       - ${OBSIDIAN_VAULT_PATH:?Set OBSIDIAN_VAULT_PATH}:/srv/obsidian/vault:rw
@@ -421,7 +423,10 @@ such as `/notes/today.md`, so the host location of the vault is never exposed.
 ### Polishing Tools (optional, OpenRouter)
 
 Registered only when `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` are set. Any
-OpenRouter model works, including Google models such as `google/<model>`. The MCP
+OpenRouter model works, including Google models such as `google/<model>`.
+Set `OPENROUTER_SERVICE_TIER=flex` to use OpenRouter's cheaper, lower-priority
+flex endpoints. Flex requests can fail with capacity errors (for example HTTP 429) instead of falling back to the default tier, and they may be slower, so
+consider raising `POLISH_TIMEOUT_MS`. The MCP
 client decides on its own when to call them, for example when the user asks
 to polish or proofread a note.
 

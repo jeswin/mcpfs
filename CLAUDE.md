@@ -106,18 +106,19 @@ mcpfs/
 
 ## Environment Variables
 
-| Variable              | Required | Default                   | Description                              |
-| --------------------- | -------- | ------------------------- | ---------------------------------------- |
-| `CLIENT_ID`           | Yes      | -                         | OAuth client ID                          |
-| `CLIENT_SECRET`       | Yes      | -                         | OAuth client secret                      |
-| `PORT`                | No       | 24024                     | Server port                              |
-| `LOG_LEVEL`           | No       | info                      | Logging level (debug, info, warn, error) |
-| `OAUTH_STATE_PATH`    | No       | `.mcpfs/oauth-state.json` | Persistent OAuth state file              |
-| `PUBLIC_URL`          | No       | Derived from request      | Public URL used in OAuth metadata        |
-| `TRUST_PROXY`         | No       | false                     | Trust reverse-proxy forwarded headers    |
-| `OPENROUTER_API_KEY`  | No       | -                         | Enables polishing tools                  |
-| `OPENROUTER_MODEL`    | With key | -                         | OpenRouter model ID for polishing        |
-| `POLISH_TEMPLATE_DIR` | No       | `/_polish`                | Vault folder for polish templates        |
+| Variable                  | Required | Default                   | Description                              |
+| ------------------------- | -------- | ------------------------- | ---------------------------------------- |
+| `CLIENT_ID`               | Yes      | -                         | OAuth client ID                          |
+| `CLIENT_SECRET`           | Yes      | -                         | OAuth client secret                      |
+| `PORT`                    | No       | 24024                     | Server port                              |
+| `LOG_LEVEL`               | No       | info                      | Logging level (debug, info, warn, error) |
+| `OAUTH_STATE_PATH`        | No       | `.mcpfs/oauth-state.json` | Persistent OAuth state file              |
+| `PUBLIC_URL`              | No       | Derived from request      | Public URL used in OAuth metadata        |
+| `TRUST_PROXY`             | No       | false                     | Trust reverse-proxy forwarded headers    |
+| `OPENROUTER_API_KEY`      | No       | -                         | Enables polishing tools                  |
+| `OPENROUTER_MODEL`        | With key | -                         | OpenRouter model ID for polishing        |
+| `OPENROUTER_SERVICE_TIER` | No       | -                         | OpenRouter service tier (e.g. `flex`)    |
+| `POLISH_TEMPLATE_DIR`     | No       | `/_polish`                | Vault folder for polish templates        |
 
 ## Git Workflow
 

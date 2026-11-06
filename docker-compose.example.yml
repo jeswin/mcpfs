@@ -12,6 +12,7 @@ services:
       # Optional: enables polish_file / polish_text
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+      OPENROUTER_SERVICE_TIER: ${OPENROUTER_SERVICE_TIER:-}
     volumes:
       - ./mcpfs/oauth:/var/lib/mcpfs:rw
       - ${OBSIDIAN_VAULT_PATH:?Set OBSIDIAN_VAULT_PATH}:/srv/obsidian/vault:rw
