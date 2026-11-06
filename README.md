@@ -161,18 +161,18 @@ MCP_AUTH_SECRET=my-owner-secret mcpfs /path/to/dir
 PORT=8080 MCP_AUTH_SECRET=my-owner-secret mcpfs /path/to/dir
 ```
 
-| Variable                 | Required          | Default    | Description                                         |
-| ------------------------ | ----------------- | ---------- | --------------------------------------------------- |
-| `MCP_AUTH_SECRET`        | Yes               | -          | Private secret required on the OAuth consent page   |
-| `PORT`                   | No                | 24024      | Server port                                         |
-| `MCP_PUBLIC_URL`         | Proxy deployments | -          | Canonical public origin used in OAuth metadata      |
-| `OAUTH_STATE_PATH`       | No                | -          | JSON file used to persist OAuth clients and tokens  |
-| `GEMINI_API_KEY`         | No                | -          | Enables the polishing tools (Google Gemini API key) |
-| `GEMINI_MODEL`           | With API key      | -          | Gemini model ID used for polishing                  |
-| `POLISH_TEMPLATE_DIR`    | No                | `/_polish` | Vault folder that holds polish templates            |
-| `POLISH_TEMPERATURE`     | No                | 0.3        | Default sampling temperature for polishing          |
-| `POLISH_MAX_CHUNK_CHARS` | No                | 6000       | Approximate characters sent per Gemini request      |
-| `POLISH_TIMEOUT_MS`      | No                | 120000     | Timeout per Gemini request                          |
+| Variable                 | Required          | Default    | Description                                        |
+| ------------------------ | ----------------- | ---------- | -------------------------------------------------- |
+| `MCP_AUTH_SECRET`        | Yes               | -          | Private secret required on the OAuth consent page  |
+| `PORT`                   | No                | 24024      | Server port                                        |
+| `MCP_PUBLIC_URL`         | Proxy deployments | -          | Canonical public origin used in OAuth metadata     |
+| `OAUTH_STATE_PATH`       | No                | -          | JSON file used to persist OAuth clients and tokens |
+| `OPENROUTER_API_KEY`     | No                | -          | Enables the polishing tools (OpenRouter API key)   |
+| `OPENROUTER_MODEL`       | With API key      | -          | OpenRouter model ID, e.g. `google/<model>`         |
+| `POLISH_TEMPLATE_DIR`    | No                | `/_polish` | Vault folder that holds polish templates           |
+| `POLISH_TEMPERATURE`     | No                | 0.3        | Default sampling temperature for polishing         |
+| `POLISH_MAX_CHUNK_CHARS` | No                | 6000       | Approximate characters sent per model request      |
+| `POLISH_TIMEOUT_MS`      | No                | 120000     | Timeout per model request                          |
 
 Back up the synchronized directory independently of mcpfs (for example with
 Restic or filesystem snapshots). A backup job must cover changes received by
@@ -235,8 +235,8 @@ services:
       OAUTH_STATE_PATH: /var/lib/mcpfs/oauth-state.json
       PORT: "24024"
       # Optional: enables polish_file / polish_text
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
     volumes:
       - ./mcpfs/oauth:/var/lib/mcpfs:rw
       - ${OBSIDIAN_VAULT_PATH:?Set OBSIDIAN_VAULT_PATH}:/srv/obsidian/vault:rw
@@ -418,14 +418,15 @@ such as `/notes/today.md`, so the host location of the vault is never exposed.
   - Returns the vault root (`/`)
   - No input required
 
-### Polishing Tools (optional, Gemini)
+### Polishing Tools (optional, OpenRouter)
 
-Registered only when `GEMINI_API_KEY` and `GEMINI_MODEL` are set. The MCP
+Registered only when `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` are set. Any
+OpenRouter model works, including Google models such as `google/<model>`. The MCP
 client decides on its own when to call them, for example when the user asks
 to polish or proofread a note.
 
 - **polish_file**
-  - Copy-edits a vault file with Gemini. The server reads the file itself, so
+  - Copy-edits a vault file with the configured model. The server reads the file itself, so
     the client does not send the content.
   - Inputs: `path`, `template` (optional), `instructions` (optional),
     `dryRun` (default `true`)

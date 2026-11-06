@@ -40,7 +40,7 @@ mcpfs is an HTTP streaming port of the official MCP Filesystem Server. It replac
 - OAuth 2.1 authentication with PKCE support
 - Persistent, hashed OAuth token state with atomic file writes
 - ChatGPT integration via MCP connectors
-- Optional Gemini-backed polishing tools with vault-stored style templates
+- Optional OpenRouter-backed polishing tools with vault-stored style templates
 
 ## Code Principles
 
@@ -94,7 +94,7 @@ mcpfs/
 │   ├── index.ts          # Main entry point, Express server, OAuth endpoints
 │   ├── oauth-store.ts    # Persistent hashed OAuth state store
 │   ├── lib.ts            # Filesystem operations, vault path mapping
-│   ├── polish.ts         # Optional Gemini polishing tools and templates
+│   ├── polish.ts         # Optional OpenRouter polishing tools and templates
 │   ├── path-utils.ts     # Path normalization utilities
 │   ├── roots-utils.ts    # MCP roots handling
 │   └── logger.ts         # Logging utilities
@@ -115,8 +115,8 @@ mcpfs/
 | `OAUTH_STATE_PATH`    | No       | `.mcpfs/oauth-state.json` | Persistent OAuth state file              |
 | `PUBLIC_URL`          | No       | Derived from request      | Public URL used in OAuth metadata        |
 | `TRUST_PROXY`         | No       | false                     | Trust reverse-proxy forwarded headers    |
-| `GEMINI_API_KEY`      | No       | -                         | Enables polishing tools                  |
-| `GEMINI_MODEL`        | With key | -                         | Gemini model ID for polishing            |
+| `OPENROUTER_API_KEY`  | No       | -                         | Enables polishing tools                  |
+| `OPENROUTER_MODEL`    | With key | -                         | OpenRouter model ID for polishing        |
 | `POLISH_TEMPLATE_DIR` | No       | `/_polish`                | Vault folder for polish templates        |
 
 ## Git Workflow

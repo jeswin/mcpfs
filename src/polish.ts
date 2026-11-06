@@ -29,7 +29,7 @@ export type PolishConfig = {
 
 type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 
-const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_TEMPLATE_DIR = "/_polish";
 const DEFAULT_TEMPERATURE = 0.3;
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -46,21 +46,23 @@ function parseNumber(raw: string | undefined, fallback: number, min: number, max
 
 /**
  * Reads polishing settings from the environment. Returns null (tools disabled)
- * when GEMINI_API_KEY or GEMINI_MODEL is missing.
+ * when OPENROUTER_API_KEY or OPENROUTER_MODEL is missing.
  */
 export function loadPolishConfig(env: NodeJS.ProcessEnv): PolishConfig | null {
-  const apiKey = env.GEMINI_API_KEY?.trim();
-  const model = env.GEMINI_MODEL?.trim();
+  const apiKey = env.OPENROUTER_API_KEY?.trim();
+  const model = env.OPENROUTER_MODEL?.trim();
   if (!apiKey) {
-    logger.info("GEMINI_API_KEY not set - polishing tools disabled");
+    logger.info("OPENROUTER_API_KEY not set - polishing tools disabled");
     return null;
   }
   if (!model) {
-    logger.warn("GEMINI_API_KEY is set but GEMINI_MODEL is missing - polishing tools disabled");
+    logger.warn(
+      "OPENROUTER_API_KEY is set but OPENROUTER_MODEL is missing - polishing tools disabled"
+    );
     return null;
   }
-  if (!/^[A-Za-z0-9._-]+$/.test(model)) {
-    logger.warn("GEMINI_MODEL contains invalid characters - polishing tools disabled");
+  if (!/^[A-Za-z0-9._:/-]+$/.test(model)) {
+    logger.warn("OPENROUTER_MODEL contains invalid characters - polishing tools disabled");
     return null;
   }
   const config: PolishConfig = {
@@ -104,86 +106,99 @@ function buildSystemPrompt(template: PolishTemplate | null, instructions: string
 }
 
 // ---------------------------------------------------------------------------
-// Gemini client
+// OpenRouter client (OpenAI-compatible chat completions)
 // ---------------------------------------------------------------------------
 
-const geminiResponseSchema = z.object({
-  candidates: z
+const openRouterErrorSchema = z.object({
+  error: z.object({
+    message: z.string().optional(),
+    code: z.union([z.string(), z.number()]).optional(),
+  }),
+});
+
+const openRouterResponseSchema = z.object({
+  choices: z
     .array(
       z.object({
-        content: z
-          .object({ parts: z.array(z.object({ text: z.string().optional() })).optional() })
-          .optional(),
-        finishReason: z.string().optional(),
+        message: z.object({ content: z.string().nullable().optional() }).optional(),
+        finish_reason: z.string().nullable().optional(),
       })
     )
     .optional(),
-  promptFeedback: z.object({ blockReason: z.string().optional() }).optional(),
 });
 
-const geminiErrorSchema = z.object({
-  error: z.object({ message: z.string().optional(), status: z.string().optional() }),
-});
+function describeOpenRouterError(body: unknown): string | undefined {
+  const parsed = openRouterErrorSchema.safeParse(body);
+  if (!parsed.success) return undefined;
+  const { code, message } = parsed.data.error;
+  return [code === undefined ? undefined : String(code), message].filter(Boolean).join(": ");
+}
 
-async function callGemini(
+async function callModel(
   config: PolishConfig,
   systemPrompt: string,
   text: string,
   temperature: number
 ): Promise<Result<string>> {
-  const url = `${GEMINI_API_BASE}/${encodeURIComponent(config.model)}:generateContent`;
   let response: globalThis.Response;
   try {
-    response = await fetch(url, {
+    response = await fetch(OPENROUTER_CHAT_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": config.apiKey },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.apiKey}`,
+        "X-Title": "mcpfs",
+      },
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: [{ role: "user", parts: [{ text }] }],
-        generationConfig: { temperature },
+        model: config.model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: text },
+        ],
+        temperature,
       }),
       signal: AbortSignal.timeout(config.timeoutMs),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { ok: false, error: `Gemini request failed: ${message}` };
+    return { ok: false, error: `OpenRouter request failed: ${message}` };
   }
 
   let body: unknown;
   try {
     body = await response.json();
   } catch {
-    return { ok: false, error: `Gemini returned a non-JSON response (HTTP ${response.status})` };
+    return {
+      ok: false,
+      error: `OpenRouter returned a non-JSON response (HTTP ${response.status})`,
+    };
   }
 
-  if (!response.ok) {
-    const parsedError = geminiErrorSchema.safeParse(body);
-    const detail = parsedError.success
-      ? [parsedError.data.error.status, parsedError.data.error.message].filter(Boolean).join(": ")
-      : "unknown error";
-    return { ok: false, error: `Gemini API error (HTTP ${response.status}): ${detail}` };
+  const apiError = describeOpenRouterError(body);
+  if (!response.ok || apiError !== undefined) {
+    return {
+      ok: false,
+      error: `OpenRouter API error (HTTP ${response.status}): ${apiError || "unknown error"}`,
+    };
   }
 
-  const parsed = geminiResponseSchema.safeParse(body);
+  const parsed = openRouterResponseSchema.safeParse(body);
   if (!parsed.success) {
-    return { ok: false, error: "Gemini returned an unexpected response shape" };
+    return { ok: false, error: "OpenRouter returned an unexpected response shape" };
   }
-  const blockReason = parsed.data.promptFeedback?.blockReason;
-  if (blockReason) {
-    return { ok: false, error: `Gemini blocked the request: ${blockReason}` };
-  }
-  const candidate = parsed.data.candidates?.[0];
-  const output = (candidate?.content?.parts ?? []).map((part) => part.text ?? "").join("");
+  const choice = parsed.data.choices?.[0];
+  const finishReason = choice?.finish_reason ?? undefined;
+  const output = choice?.message?.content ?? "";
   if (!output.trim()) {
     return {
       ok: false,
-      error: `Gemini returned no text (finish reason: ${candidate?.finishReason ?? "unknown"})`,
+      error: `Model returned no text (finish reason: ${finishReason ?? "unknown"})`,
     };
   }
-  if (candidate?.finishReason && candidate.finishReason !== "STOP") {
+  if (finishReason !== undefined && finishReason !== "stop") {
     return {
       ok: false,
-      error: `Gemini stopped early (finish reason: ${candidate.finishReason}); try a smaller POLISH_MAX_CHUNK_CHARS`,
+      error: `Model stopped early (finish reason: ${finishReason}); try a smaller POLISH_MAX_CHUNK_CHARS`,
     };
   }
   return { ok: true, value: output };
@@ -253,7 +268,7 @@ async function polishBody(
       polished.push(chunk);
       continue;
     }
-    const result = await callGemini(config, systemPrompt, core, temperature);
+    const result = await callModel(config, systemPrompt, core, temperature);
     if (!result.ok) throw new Error(result.error);
     polished.push(leading + stripWrappingFence(result.value, core) + trailing);
   }
@@ -474,8 +489,8 @@ export function registerPolishTools(server: McpServer, config: PolishConfig): vo
     {
       title: "Polish File",
       description:
-        "Polish (copy-edit) the prose of a text or Markdown file with a dedicated Gemini " +
-        "editing model. Use this when the user asks to polish, proofread, copy-edit, or " +
+        "Polish (copy-edit) the prose of a text or Markdown file with a dedicated " +
+        "editing model (via OpenRouter). Use this when the user asks to polish, proofread, copy-edit, or " +
         "improve the writing of a note (for example '윤문', '교정', '다듬어줘'). The server reads " +
         "the file itself, so do not pass the content. Meaning, Markdown structure, links, " +
         "code, and YAML frontmatter are preserved. By default (dryRun: true) it returns a " +
@@ -550,7 +565,7 @@ export function registerPolishTools(server: McpServer, config: PolishConfig): vo
     {
       title: "Polish Text",
       description:
-        "Polish (copy-edit) a piece of text with a dedicated Gemini editing model and return " +
+        "Polish (copy-edit) a piece of text with a dedicated editing model (via OpenRouter) and return " +
         "the polished text. Use this for text that is not stored in a vault file; for files " +
         "use polish_file instead so the content does not need to be sent. Meaning, Markdown " +
         "structure, links, and code are preserved. " +

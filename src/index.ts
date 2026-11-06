@@ -569,7 +569,7 @@ const vaultRoot = await (async () => {
 // Initialize the vault root in lib.ts
 setVaultRoot(vaultRoot);
 
-// Optional Gemini-backed polishing tools (enabled when GEMINI_API_KEY is set)
+// Optional OpenRouter-backed polishing tools (enabled when OPENROUTER_API_KEY is set)
 const polishConfig = loadPolishConfig(process.env);
 
 // Type definitions for tool arguments (with undefined to satisfy exactOptionalPropertyTypes)
