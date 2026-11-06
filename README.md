@@ -36,7 +36,7 @@ call a synchronization API or require a particular synchronization backend.
 - Move files and directories
 - Search files
 - Get file metadata
-- Fixed directory access: only the configured synchronized vault is exposed
+- Single vault root: only the configured vault is exposed, and clients address it as `/`
 - **OAuth 2.1 authentication** with PKCE support
 - **ChatGPT integration** via MCP connectors
 - Works with native Syncthing services and other filesystem synchronizers
@@ -143,7 +143,7 @@ server will refuse to auto-serve:
 - Home directory (`~`)
 - System directories (`/usr`, `/etc`, `/var`, `/System`, etc.)
 
-To serve these directories, you must specify them explicitly as command-line arguments.
+To serve these directories, you must specify them explicitly as the command-line argument.
 
 ### Command Line Options
 
@@ -313,11 +313,28 @@ curl -X POST http://localhost:24024/mcp \
 The server uses a fixed directory access control system for the synchronized
 vault.
 
-### Method 1: Command-line Arguments
+### Single Vault Root
 
 ```bash
-mcpfs /path/to/dir1 /path/to/dir2
+mcpfs /srv/obsidian/mcp-vault
 ```
+
+Exactly one directory (the vault) is served. Passing more than one directory
+is an error.
+
+Clients see the vault as `/`, so tool paths are short vault-relative paths
+instead of absolute host paths:
+
+| Client path                       | Resolves to                            |
+| --------------------------------- | -------------------------------------- |
+| `/`, `.` or empty string          | vault root                             |
+| `notes/today.md`                  | `<vault>/notes/today.md`               |
+| `/notes/today.md`                 | `<vault>/notes/today.md`               |
+| `/srv/obsidian/mcp-vault/x.md`    | `<vault>/x.md` (legacy absolute paths) |
+| `../other`, symlinks out of vault | rejected                               |
+
+Tool output (search results, diffs, error messages) also uses vault paths
+such as `/notes/today.md`, so the host location of the vault is never exposed.
 
 ### How It Works
 
@@ -389,7 +406,7 @@ mcpfs /path/to/dir1 /path/to/dir2
   - Input: `path` (string)
 
 - **list_allowed_directories**
-  - List all accessible directories
+  - Returns the vault root (`/`)
   - No input required
 
 ### Tool Annotations

@@ -36,7 +36,7 @@ mcpfs is an HTTP streaming port of the official MCP Filesystem Server. It replac
 - Move files/directories
 - Search files
 - Get file metadata
-- Dynamic directory access control via MCP Roots
+- Single vault root: clients address the served directory as `/`
 - OAuth 2.1 authentication with PKCE support
 - Persistent, hashed OAuth token state with atomic file writes
 - ChatGPT integration via MCP connectors
