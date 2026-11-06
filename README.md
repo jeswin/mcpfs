@@ -161,12 +161,18 @@ MCP_AUTH_SECRET=my-owner-secret mcpfs /path/to/dir
 PORT=8080 MCP_AUTH_SECRET=my-owner-secret mcpfs /path/to/dir
 ```
 
-| Variable           | Required          | Default | Description                                        |
-| ------------------ | ----------------- | ------- | -------------------------------------------------- |
-| `MCP_AUTH_SECRET`  | Yes               | -       | Private secret required on the OAuth consent page  |
-| `PORT`             | No                | 24024   | Server port                                        |
-| `MCP_PUBLIC_URL`   | Proxy deployments | -       | Canonical public origin used in OAuth metadata     |
-| `OAUTH_STATE_PATH` | No                | -       | JSON file used to persist OAuth clients and tokens |
+| Variable                 | Required          | Default    | Description                                         |
+| ------------------------ | ----------------- | ---------- | --------------------------------------------------- |
+| `MCP_AUTH_SECRET`        | Yes               | -          | Private secret required on the OAuth consent page   |
+| `PORT`                   | No                | 24024      | Server port                                         |
+| `MCP_PUBLIC_URL`         | Proxy deployments | -          | Canonical public origin used in OAuth metadata      |
+| `OAUTH_STATE_PATH`       | No                | -          | JSON file used to persist OAuth clients and tokens  |
+| `GEMINI_API_KEY`         | No                | -          | Enables the polishing tools (Google Gemini API key) |
+| `GEMINI_MODEL`           | With API key      | -          | Gemini model ID used for polishing                  |
+| `POLISH_TEMPLATE_DIR`    | No                | `/_polish` | Vault folder that holds polish templates            |
+| `POLISH_TEMPERATURE`     | No                | 0.3        | Default sampling temperature for polishing          |
+| `POLISH_MAX_CHUNK_CHARS` | No                | 6000       | Approximate characters sent per Gemini request      |
+| `POLISH_TIMEOUT_MS`      | No                | 120000     | Timeout per Gemini request                          |
 
 Back up the synchronized directory independently of mcpfs (for example with
 Restic or filesystem snapshots). A backup job must cover changes received by
@@ -228,6 +234,9 @@ services:
       MCP_PUBLIC_URL: ${MCPFS_PUBLIC_URL:?Set MCPFS_PUBLIC_URL externally}
       OAUTH_STATE_PATH: /var/lib/mcpfs/oauth-state.json
       PORT: "24024"
+      # Optional: enables polish_file / polish_text
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
     volumes:
       - ./mcpfs/oauth:/var/lib/mcpfs:rw
       - ${OBSIDIAN_VAULT_PATH:?Set OBSIDIAN_VAULT_PATH}:/srv/obsidian/vault:rw
@@ -409,6 +418,52 @@ such as `/notes/today.md`, so the host location of the vault is never exposed.
   - Returns the vault root (`/`)
   - No input required
 
+### Polishing Tools (optional, Gemini)
+
+Registered only when `GEMINI_API_KEY` and `GEMINI_MODEL` are set. The MCP
+client decides on its own when to call them, for example when the user asks
+to polish or proofread a note.
+
+- **polish_file**
+  - Copy-edits a vault file with Gemini. The server reads the file itself, so
+    the client does not send the content.
+  - Inputs: `path`, `template` (optional), `instructions` (optional),
+    `dryRun` (default `true`)
+  - `dryRun: true` returns a diff. Calling again with `dryRun: false` and the
+    same arguments writes exactly the previewed result (cached for 30
+    minutes) without another model call. If the file changed in the meantime,
+    nothing is written.
+- **polish_text**
+  - Copy-edits text passed directly and returns the result
+  - Inputs: `text`, `template` (optional), `instructions` (optional)
+- **list_polish_templates**
+  - Lists templates with their descriptions so the client can pick one
+- **save_polish_template**
+  - Inputs: `name`, `description`, `instructions`, `temperature` (optional),
+    `overwrite` (default `false`)
+
+Built-in rules always apply and cannot be overridden by a template: meaning,
+language, Markdown structure, wikilinks and code are preserved, and YAML
+frontmatter is never sent to the model. Long files are split at blank lines
+outside code blocks.
+
+Templates are Markdown notes in `POLISH_TEMPLATE_DIR` and can also be edited
+in Obsidian:
+
+```md
+---
+description: "Blog posts: keep casual tone, short sentences"
+temperature: 0.2
+---
+
+- Keep each sentence under about 40 characters.
+- Prefer active voice.
+```
+
+Tool descriptions instruct clients to write template and instruction prompts
+in English unless the user asks for another language. The polished text
+always keeps its own language.
+
 ### Tool Annotations
 
 | Tool                        | readOnlyHint | idempotentHint | destructiveHint |
@@ -426,6 +481,10 @@ such as `/notes/today.md`, so the host location of the vault is never exposed.
 | `write_file`                | `false`      | `true`         | `true`          |
 | `edit_file`                 | `false`      | `false`        | `true`          |
 | `move_file`                 | `false`      | `false`        | `false`         |
+| `polish_text`               | `true`       | –              | –               |
+| `list_polish_templates`     | `true`       | –              | –               |
+| `polish_file`               | `false`      | `false`        | `true`          |
+| `save_polish_template`      | `false`      | `true`         | `true`          |
 
 ---
 

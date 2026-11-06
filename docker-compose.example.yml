@@ -9,6 +9,9 @@ services:
       MCP_PUBLIC_URL: ${MCPFS_PUBLIC_URL:?Set MCPFS_PUBLIC_URL externally}
       OAUTH_STATE_PATH: /var/lib/mcpfs/oauth-state.json
       PORT: "24024"
+      # Optional: enables polish_file / polish_text
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
     volumes:
       - ./mcpfs/oauth:/var/lib/mcpfs:rw
       - ${OBSIDIAN_VAULT_PATH:?Set OBSIDIAN_VAULT_PATH}:/srv/obsidian/vault:rw

@@ -69,6 +69,26 @@ export function maskVaultRoot(message: string): string {
     .join("/");
 }
 
+// All tool paths are relative to the vault root, which clients see as "/".
+export const VAULT_PATH_NOTE =
+  "Paths are relative to the vault root, which is '/'. " +
+  "For example 'notes/today.md' and '/notes/today.md' are the same file.";
+
+// Wraps a tool handler so that error messages never expose the absolute
+// location of the vault on the host.
+export function withVaultErrors<A extends unknown[], R>(
+  handler: (...handlerArgs: A) => Promise<R>
+): (...handlerArgs: A) => Promise<R> {
+  return async (...handlerArgs: A) => {
+    try {
+      return await handler(...handlerArgs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(maskVaultRoot(message));
+    }
+  };
+}
+
 // Type definitions
 type FileInfo = {
   size: number;

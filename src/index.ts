@@ -29,8 +29,10 @@ import {
   headFile,
   setVaultRoot,
   toVaultPath,
-  maskVaultRoot,
+  withVaultErrors,
+  VAULT_PATH_NOTE,
 } from "./lib.js";
+import { loadPolishConfig, registerPolishTools } from "./polish.js";
 
 // Get the directory where this script is located
 const __filename = fileURLToPath(import.meta.url);
@@ -567,25 +569,8 @@ const vaultRoot = await (async () => {
 // Initialize the vault root in lib.ts
 setVaultRoot(vaultRoot);
 
-// All tool paths are relative to the vault root, which clients see as "/".
-const VAULT_PATH_NOTE =
-  "Paths are relative to the vault root, which is '/'. " +
-  "For example 'notes/today.md' and '/notes/today.md' are the same file.";
-
-// Wraps a tool handler so that error messages never expose the absolute
-// location of the vault on the host.
-function withVaultErrors<A extends unknown[], R>(
-  handler: (...handlerArgs: A) => Promise<R>
-): (...handlerArgs: A) => Promise<R> {
-  return async (...handlerArgs: A) => {
-    try {
-      return await handler(...handlerArgs);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(maskVaultRoot(message));
-    }
-  };
-}
+// Optional Gemini-backed polishing tools (enabled when GEMINI_API_KEY is set)
+const polishConfig = loadPolishConfig(process.env);
 
 // Type definitions for tool arguments (with undefined to satisfy exactOptionalPropertyTypes)
 type ReadTextFileArgs = {
@@ -1236,6 +1221,11 @@ function createServer() {
 
   // MCP Roots are intentionally ignored. The server exposes only the
   // operator-selected vault directory passed at startup.
+
+  if (polishConfig) {
+    registerPolishTools(server, polishConfig);
+  }
+
   return server;
 }
 
